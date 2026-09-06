@@ -169,92 +169,7 @@ func (a *ComposeApp) SetTitle(title, lang string) {
 }
 
 func (a *ComposeApp) Update(ctx context.Context) error {
-	if len(a.ComposeFiles) <= 0 {
-		return ErrComposeFileNotFound
-	}
-
-	if len(a.ComposeFiles) > 1 {
-		logger.Info("warning: multiple compose files found, only the first one will be used", zap.String("compose files", strings.Join(a.ComposeFiles, ",")))
-	}
-
-	storeInfo, err := a.StoreInfo(true)
-	if err != nil {
-		return err
-	}
-
-	if storeInfo == nil || storeInfo.StoreAppID == nil || *storeInfo.StoreAppID == "" {
-		return ErrStoreInfoNotFound
-	}
-
-	storeComposeApp, err := MyService.AppStoreManagement().ComposeApp(*storeInfo.StoreAppID)
-	if err != nil {
-		return err
-	}
-
-	if storeComposeApp == nil {
-		return ErrNotFoundInAppStore
-	}
-
-	localComposeAppServices := lo.Map(a.Services, func(service types.ServiceConfig, i int) string { return service.Name })
-	storeComposeAppServices := lo.Map(storeComposeApp.Services, func(service types.ServiceConfig, i int) string { return service.Name })
-
-	localAbsentOfStore, storeAbsentOfLocal := lo.Difference(localComposeAppServices, storeComposeAppServices)
-	if len(localAbsentOfStore) > 0 {
-		logger.Error("local compose app has container apps that are not present in store compose app, thus update is not possible", zap.Strings("absent", localAbsentOfStore))
-		return ErrComposeAppNotMatch
-	}
-
-	if len(storeAbsentOfLocal) > 0 {
-		logger.Error("store compose app has container apps that are not present in local compose app, thus update is not possible", zap.Strings("absent", storeAbsentOfLocal))
-		return ErrComposeAppNotMatch
-	}
-
-	for _, service := range storeComposeApp.Services {
-		localComposeAppService := a.App(service.Name)
-
-		for _, tag := range common.NeedCheckDigestTags {
-			if strings.HasSuffix(service.Image, tag) {
-				// keep latest
-			} else {
-				localComposeAppService.Image = service.Image
-			}
-		}
-	}
-
-	// the code is need by stable diffusion.
-	removeRuntime(a)
-
-	newComposeYAML, err := yaml.Marshal(a)
-	if err != nil {
-		return err
-	}
-
-	// prepare for message bus events
-	eventProperties := common.PropertiesFromContext(ctx)
-	eventProperties[common.PropertyTypeAppName.Name] = a.Name
-
-	if err := a.UpdateEventPropertiesFromStoreInfo(eventProperties); err != nil {
-		logger.Info("failed to update event properties from store info", zap.Error(err), zap.String("name", a.Name))
-	}
-
-	go func(ctx context.Context) {
-		go PublishEventWrapper(ctx, common.EventTypeAppUpdateBegin, nil)
-
-		defer PublishEventWrapper(ctx, common.EventTypeAppUpdateEnd, nil)
-
-		MyService.AppStoreManagement().StartUpgrade(a.Name)
-		defer MyService.AppStoreManagement().FinishUpgrade(a.Name)
-
-		if err := a.PullAndApply(ctx, newComposeYAML); err != nil {
-			go PublishEventWrapper(ctx, common.EventTypeAppUpdateError, map[string]string{
-				common.PropertyTypeMessage.Name: err.Error(),
-			})
-
-			logger.Error("failed to update compose app", zap.Error(err), zap.String("name", a.Name))
-		}
-	}(ctx)
-
-	return nil
+	return Updates.Start(ctx, a, false)
 }
 
 // TODO rename the function to service and add error return value
@@ -478,7 +393,7 @@ func (a *ComposeApp) PullAndApply(ctx context.Context, newComposeYAML []byte) er
 
 	err = newComposeApp.UpWithCheckRequire(ctx, service)
 
-	success = true
+	success = err == nil
 
 	return err
 }
@@ -664,7 +579,13 @@ func (a *ComposeApp) Apply(ctx context.Context, newComposeYAML []byte) error {
 		logger.Info("failed to update event properties from store info", zap.Error(err), zap.String("name", a.Name))
 	}
 
+	unlock, err := LockAppOperation(a.Name)
+	if err != nil {
+		return err
+	}
+
 	go func(ctx context.Context) {
+		defer unlock()
 		go PublishEventWrapper(ctx, common.EventTypeAppApplyChangesBegin, nil)
 
 		defer PublishEventWrapper(ctx, common.EventTypeAppApplyChangesEnd, nil)
@@ -675,6 +596,8 @@ func (a *ComposeApp) Apply(ctx context.Context, newComposeYAML []byte) error {
 			})
 
 			logger.Error("failed to apply changes to compose app", zap.Error(err), zap.String("name", a.Name))
+		} else if err := Updates.SettingsChanged(a); err != nil {
+			logger.Error("failed to refresh update status", zap.Error(err))
 		}
 	}(ctx)
 
@@ -686,7 +609,18 @@ func (a *ComposeApp) SetStatus(ctx context.Context, status codegen.RequestCompos
 	if err != nil {
 		return err
 	}
-	defer dockerClient.Close()
+	unlock, err := LockAppOperation(a.Name)
+	if err != nil {
+		dockerClient.Close()
+		return err
+	}
+	switch status {
+	case codegen.RequestComposeAppStatusStart, codegen.RequestComposeAppStatusStop, codegen.RequestComposeAppStatusRestart:
+	default:
+		unlock()
+		dockerClient.Close()
+		return ErrInvalidComposeAppStatus
+	}
 
 	eventProperties := common.PropertiesFromContext(ctx)
 	eventProperties[common.PropertyTypeAppName.Name] = a.Name
@@ -694,6 +628,8 @@ func (a *ComposeApp) SetStatus(ctx context.Context, status codegen.RequestCompos
 	switch status {
 	case codegen.RequestComposeAppStatusStart:
 		go func(ctx context.Context) {
+			defer unlock()
+			defer dockerClient.Close()
 			go PublishEventWrapper(ctx, common.EventTypeAppStartBegin, nil)
 
 			defer PublishEventWrapper(ctx, common.EventTypeAppStartEnd, nil)
@@ -732,6 +668,8 @@ func (a *ComposeApp) SetStatus(ctx context.Context, status codegen.RequestCompos
 		}(ctx)
 	case codegen.RequestComposeAppStatusStop:
 		go func(ctx context.Context) {
+			defer unlock()
+			defer dockerClient.Close()
 			go PublishEventWrapper(ctx, common.EventTypeAppStopBegin, nil)
 
 			defer PublishEventWrapper(ctx, common.EventTypeAppStopEnd, nil)
@@ -746,6 +684,8 @@ func (a *ComposeApp) SetStatus(ctx context.Context, status codegen.RequestCompos
 		}(ctx)
 	case codegen.RequestComposeAppStatusRestart:
 		go func(ctx context.Context) {
+			defer unlock()
+			defer dockerClient.Close()
 			go PublishEventWrapper(ctx, common.EventTypeAppRestartBegin, nil)
 
 			defer PublishEventWrapper(ctx, common.EventTypeAppRestartEnd, nil)
@@ -899,6 +839,7 @@ func LoadComposeAppFromConfigFile(appID string, configFile string) (*ComposeApp,
 	options := composeCmd.ProjectOptions{
 		ProjectDir:  filepath.Dir(configFile),
 		ProjectName: appID,
+		ConfigPaths: []string{configFile},
 	}
 
 	env := []string{fmt.Sprintf("%s=%s", "AppID", appID)}

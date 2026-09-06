@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/IceWhaleTech/CasaOS-AppManagement/codegen"
@@ -31,6 +32,7 @@ type AppStore interface {
 }
 
 type appStore struct {
+	mu          sync.Mutex
 	categoryMap map[string]codegen.CategoryInfo
 	catalog     map[string]*ComposeApp
 	recommend   []string
@@ -40,15 +42,18 @@ type appStore struct {
 }
 
 var (
-	appStoreMap = make(map[string]*appStore)
+	appStoreMap   = make(map[string]*appStore)
+	appStoreMapMu sync.Mutex
 
 	ErrNotAppStore             = fmt.Errorf("not an appstore")
 	ErrDefaultAppStoreNotFound = fmt.Errorf("default appstore not found")
 )
 
 func (s *appStore) CategoryMap() (map[string]codegen.CategoryInfo, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.categoryMap != nil {
-		return s.categoryMap, nil
+		return copyMap(s.categoryMap), nil
 	}
 
 	workdir, err := s.WorkDir()
@@ -65,10 +70,15 @@ func (s *appStore) CategoryMap() (map[string]codegen.CategoryInfo, error) {
 
 	s.categoryMap = categoryMap
 
-	return s.categoryMap, nil
+	return copyMap(s.categoryMap), nil
 }
 
-func (s *appStore) UpdateCatalog() error {
+func (s *appStore) UpdateCatalog() error { return s.refreshCatalog(false) }
+
+// Explicit user checks must not mistake equal archive sizes for equal releases.
+func (s *appStore) refreshCatalog(force bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	isSuccessful := false
 
 	if _, err := url.Parse(s.url); err != nil {
@@ -79,15 +89,16 @@ func (s *appStore) UpdateCatalog() error {
 	// if not, skip the update
 	{
 		// timeout 5s
-		http.DefaultClient.Timeout = 5 * time.Second
-		res, err := http.Head(s.url)
+		client := &http.Client{Timeout: 5 * time.Second}
+		res, err := client.Head(s.url)
 		if err != nil {
 			return err
 		}
+		defer res.Body.Close()
 		if res.StatusCode != http.StatusOK {
 			return fmt.Errorf("failed to get appstore size, status code: %d", res.StatusCode)
 		}
-		if res.ContentLength == s.lastAPPStoreSize {
+		if !force && res.ContentLength == s.lastAPPStoreSize {
 			logger.Info("appstore size not changed", zap.String("url", s.url))
 			return nil
 		}
@@ -175,8 +186,10 @@ func (s *appStore) UpdateCatalog() error {
 }
 
 func (s *appStore) Recommend() ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.recommend != nil && len(s.recommend) > 0 {
-		return s.recommend, nil
+		return append([]string(nil), s.recommend...), nil
 	}
 
 	workdir, err := s.WorkDir()
@@ -193,8 +206,10 @@ func (s *appStore) Recommend() ([]string, error) {
 }
 
 func (s *appStore) Catalog() (map[string]*ComposeApp, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.catalog != nil && len(s.catalog) > 0 {
-		return s.catalog, nil
+		return copyMap(s.catalog), nil
 	}
 
 	workdir, err := s.WorkDir()
@@ -214,7 +229,7 @@ func (s *appStore) Catalog() (map[string]*ComposeApp, error) {
 
 	s.catalog = catalog
 
-	return s.catalog, nil
+	return copyMap(s.catalog), nil
 }
 
 func (s *appStore) ComposeApp(appStoreID string) (*ComposeApp, error) {
@@ -248,6 +263,8 @@ func (s *appStore) WorkDir() (string, error) {
 }
 
 func AppStoreByURL(appstoreURL string) (AppStore, error) {
+	appStoreMapMu.Lock()
+	defer appStoreMapMu.Unlock()
 	_, err := url.Parse(appstoreURL)
 	if err != nil {
 		return nil, err
@@ -430,4 +447,12 @@ func StoreRoot(workdir string) (string, error) {
 	}
 
 	return "", ErrNotAppStore
+}
+
+func copyMap[K comparable, V any](source map[K]V) map[K]V {
+	result := make(map[K]V, len(source))
+	for key, value := range source {
+		result[key] = value
+	}
+	return result
 }
