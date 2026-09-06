@@ -5,6 +5,8 @@ package docker
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 
 	"github.com/docker/docker/api/types"
@@ -44,15 +46,48 @@ func PullImage(ctx context.Context, imageName string, handleOut func(io.ReadClos
 	}
 	defer out.Close()
 
-	if handleOut != nil {
-		handleOut(out)
-	} else {
-		if _, err := io.ReadAll(out); err != nil {
+	if handleOut == nil {
+		return consumePullMessages(out, nil)
+	}
+	// Validate the daemon's JSON stream even when the progress callback ignores read errors.
+	reader, writer := io.Pipe()
+	result := make(chan error, 1)
+	go func() {
+		err := consumePullMessages(out, writer)
+		writer.CloseWithError(err)
+		result <- err
+	}()
+	handleOut(reader)
+	reader.Close()
+	return <-result
+
+}
+
+// Docker can return HTTP 200 followed by a JSON error during an image download.
+func consumePullMessages(input io.Reader, progress io.Writer) error {
+	decoder := json.NewDecoder(input)
+	for {
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err == io.EOF {
+			return nil
+		} else if err != nil {
 			return err
 		}
+		var message struct {
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal(raw, &message); err != nil {
+			return err
+		}
+		if message.Error != "" {
+			return fmt.Errorf("image pull failed: %s", message.Error)
+		}
+		if progress != nil {
+			if _, err := progress.Write(append(raw, '\n')); err != nil {
+				return err
+			}
+		}
 	}
-
-	return nil
 }
 
 func HasNewImage(ctx context.Context, imageName string, currentImageID string) (bool, string, error) {

@@ -120,7 +120,12 @@ func (s *ComposeService) Uninstall(ctx context.Context, composeApp *ComposeApp, 
 		logger.Info("failed to update event properties from store info", zap.Error(err), zap.String("name", composeApp.Name))
 	}
 
+	unlock, err := LockAppOperation(composeApp.Name)
+	if err != nil {
+		return err
+	}
 	go func(ctx context.Context) {
+		defer unlock()
 		go PublishEventWrapper(ctx, common.EventTypeAppUninstallBegin, nil)
 
 		defer PublishEventWrapper(ctx, common.EventTypeAppUninstallEnd, nil)
@@ -131,6 +136,8 @@ func (s *ComposeService) Uninstall(ctx context.Context, composeApp *ComposeApp, 
 			})
 
 			logger.Error("failed to uninstall compose app", zap.Error(err), zap.String("name", composeApp.Name))
+		} else if err := Updates.Forget(ctx, composeApp.Name); err != nil {
+			logger.Error("failed to remove update history", zap.Error(err))
 		}
 	}(ctx)
 

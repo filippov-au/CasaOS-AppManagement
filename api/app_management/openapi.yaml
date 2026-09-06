@@ -307,6 +307,64 @@ paths:
         "500":
           $ref: "#/components/responses/ResponseInternalServerError"
   
+  /updates:
+    get:
+      summary: List installed apps with update checks, operation status and rollback availability
+      operationId: appUpdates
+      tags: [Compose methods]
+      responses:
+        "200":
+          description: Installed app update status; contains no saved configuration or credentials
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AppUpdateStatus"
+        "500":
+          $ref: "#/components/responses/ResponseInternalServerError"
+  /updates/check:
+    post:
+      summary: Refresh store catalogs and check every installed app without pulling images
+      operationId: checkAppUpdates
+      tags: [Compose methods]
+      responses:
+        "200":
+          description: Refreshed statuses, including per-app check failures
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AppUpdateStatus"
+        "409":
+          $ref: "#/components/responses/ResponseConflict"
+        "500":
+          $ref: "#/components/responses/ResponseInternalServerError"
+  /compose/{id}/rollback:
+    post:
+      summary: Recreate an app using its saved previous images and configuration, keeping current volumes
+      operationId: rollbackComposeApp
+      tags: [Compose methods]
+      parameters:
+        - $ref: "#/components/parameters/ComposeAppID"
+      responses:
+        "202":
+          description: Rollback started; poll GET /updates for its result
+        "404":
+          $ref: "#/components/responses/ResponseNotFound"
+        "409":
+          $ref: "#/components/responses/ResponseConflict"
+        "500":
+          $ref: "#/components/responses/ResponseInternalServerError"
+
   /apps/upgradable:
     get:
       summary: Get the list of upgradable apps from installed app.
@@ -465,6 +523,8 @@ paths:
           $ref: "#/components/responses/ComposeAppOK"
         "404":
           $ref: "#/components/responses/ResponseNotFound"
+        "409":
+          $ref: "#/components/responses/ResponseConflict"
         "500":
           $ref: "#/components/responses/ResponseInternalServerError"
 
@@ -493,6 +553,8 @@ paths:
           $ref: "#/components/responses/ComposeAppBadRequest"
         "404":
           $ref: "#/components/responses/ResponseNotFound"
+        "409":
+          $ref: "#/components/responses/ResponseConflict"
         "500":
           $ref: "#/components/responses/ResponseInternalServerError"
 
@@ -511,6 +573,8 @@ paths:
           $ref: "#/components/responses/ComposeAppUpdateOK"
         "404":
           $ref: "#/components/responses/ResponseNotFound"
+        "409":
+          $ref: "#/components/responses/ResponseConflict"
         "500":
           $ref: "#/components/responses/ResponseInternalServerError"
     delete:
@@ -528,6 +592,8 @@ paths:
           $ref: "#/components/responses/ComposeAppUninstallOK"
         "404":
           $ref: "#/components/responses/ResponseNotFound"
+        "409":
+          $ref: "#/components/responses/ResponseConflict"
         "500":
           $ref: "#/components/responses/ResponseInternalServerError"
 
@@ -550,6 +616,8 @@ paths:
           $ref: "#/components/responses/ResponseBadRequest"
         "404":
           $ref: "#/components/responses/ResponseNotFound"
+        "409":
+          $ref: "#/components/responses/ResponseConflict"
         "500":
           $ref: "#/components/responses/ResponseInternalServerError"
 
@@ -1207,6 +1275,45 @@ components:
                     items:
                       $ref: "#/components/schemas/WebAppGridItem"
   schemas:
+    AppUpdateStatus:
+      type: object
+      required: [id, title, icon, current_version, check_status, operation, rollback_available]
+      properties:
+        id:
+          type: string
+        title:
+          type: object
+          additionalProperties:
+            type: string
+        icon:
+          type: string
+        current_version:
+          type: string
+        target_version:
+          type: string
+        check_status:
+          type: string
+          enum: [unchecked, available, up_to_date, unmanaged, failed]
+        checked_at:
+          type: string
+          format: date-time
+        check_error:
+          type: string
+        operation:
+          type: string
+          enum: [idle, busy, preparing, pulling, applying, reverting, updated, reverted, failed, interrupted]
+        error:
+          type: string
+        rollback_available:
+          type: boolean
+        rollback_version:
+          type: string
+        rollback_date:
+          type: string
+          format: date-time
+        rollback_reason:
+          type: string
+
     BaseResponse:
       properties:
         message:

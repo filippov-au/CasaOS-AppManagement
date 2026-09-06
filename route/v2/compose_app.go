@@ -261,6 +261,9 @@ func (a *AppManagement) ApplyComposeAppSettings(ctx echo.Context, id codegen.Com
 	backgroundCtx := common.WithProperties(context.Background(), PropertiesFromQueryParams(ctx))
 
 	if err := composeApp.Apply(backgroundCtx, buf); err != nil {
+		if errors.Is(err, service.ErrAppOperationBusy) {
+			return updateError(ctx, err)
+		}
 		message := err.Error()
 		return ctx.JSON(http.StatusInternalServerError, codegen.ResponseInternalServerError{
 			Message: &message,
@@ -386,6 +389,9 @@ func (a *AppManagement) UninstallComposeApp(ctx echo.Context, id codegen.Compose
 	}
 
 	if err := service.MyService.Compose().Uninstall(backgroundCtx, composeApp, deleteConfigFolder); err != nil {
+		if errors.Is(err, service.ErrAppOperationBusy) {
+			return updateError(ctx, err)
+		}
 		logger.Error("failed to uninstall compose app", zap.Error(err), zap.String("appID", id))
 		message := err.Error()
 		return ctx.JSON(http.StatusInternalServerError, codegen.ResponseInternalServerError{Message: &message})
@@ -427,6 +433,9 @@ func (a *AppManagement) UpdateComposeApp(ctx echo.Context, id codegen.ComposeApp
 	backgroundCtx := common.WithProperties(context.Background(), PropertiesFromQueryParams(ctx))
 
 	if err := composeApp.Update(backgroundCtx); err != nil {
+		if errors.Is(err, service.ErrAppOperationBusy) {
+			return updateError(ctx, err)
+		}
 		logger.Error("failed to update compose app", zap.Error(err), zap.String("appID", id))
 		message := err.Error()
 		return ctx.JSON(http.StatusInternalServerError, codegen.ResponseInternalServerError{Message: &message})
@@ -466,6 +475,9 @@ func (a *AppManagement) SetComposeAppStatus(ctx echo.Context, id codegen.Compose
 
 	backgroundCtx := common.WithProperties(context.Background(), PropertiesFromQueryParams(ctx))
 	if err := composeApp.SetStatus(backgroundCtx, action); err != nil {
+		if errors.Is(err, service.ErrAppOperationBusy) {
+			return updateError(ctx, err)
+		}
 		message := err.Error()
 
 		if err == service.ErrInvalidComposeAppStatus {
