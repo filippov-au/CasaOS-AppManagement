@@ -11,6 +11,7 @@ import (
 	"time"
 
 	dockerTypes "github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
 	"github.com/opencontainers/go-digest"
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 )
@@ -110,7 +111,11 @@ func newRegistryFixture(t *testing.T) *registryFixture {
 }
 
 func (f *registryFixture) addImage(tag, arch, version string) string {
-	config, _ := json.Marshal(map[string]interface{}{"architecture": arch, "os": "linux", "config": map[string]interface{}{"Env": []string{"VERSION=" + version}}})
+	return f.addLabeledImage(tag, arch, version, nil)
+}
+
+func (f *registryFixture) addLabeledImage(tag, arch, version string, labels map[string]string) string {
+	config, _ := json.Marshal(map[string]interface{}{"architecture": arch, "os": "linux", "config": map[string]interface{}{"Env": []string{"VERSION=" + version}, "Labels": labels}})
 	id := digest.FromBytes(config)
 	f.blobs[id.String()] = config
 	manifest, _ := json.Marshal(map[string]interface{}{"schemaVersion": 2, "mediaType": v1.MediaTypeImageManifest, "config": map[string]interface{}{"mediaType": v1.MediaTypeImageConfig, "digest": id, "size": len(config)}, "layers": []interface{}{}})
@@ -138,7 +143,7 @@ func TestRegistryCheckFindsStableVersionOnInstalledPlatform(t *testing.T) {
 
 func TestRegistryCheckFloatingTagsAndIndexChanges(t *testing.T) {
 	f := newRegistryFixture(t)
-	id := f.addImage("amd64", "amd64", "1")
+	id := f.addLabeledImage("amd64", "amd64", "1", map[string]string{"org.opencontainers.image.version": "1.2.3"})
 	f.addImage("arm64", "arm64", "2")
 	index, _ := json.Marshal(map[string]interface{}{"schemaVersion": 2, "mediaType": v1.MediaTypeImageIndex, "manifests": []v1.Descriptor{
 		{MediaType: v1.MediaTypeImageManifest, Digest: digest.FromBytes(f.manifests["arm64"]), Size: int64(len(f.manifests["arm64"])), Platform: &v1.Platform{OS: "linux", Architecture: "arm64"}},
@@ -147,12 +152,12 @@ func TestRegistryCheckFloatingTagsAndIndexChanges(t *testing.T) {
 	f.manifests["latest"] = index
 	f.failTags = true // Floating tags must not enumerate or change channels.
 	result := f.check("latest", id)
-	if result.Status != "up_to_date" || result.LatestImageID != id {
+	if result.Status != "up_to_date" || result.LatestImageID != id || result.LatestVersion != "1.2.3" {
 		t.Fatalf("%+v", result)
 	}
 	newID := f.addImage("latest", "amd64", "2")
 	result = f.check("latest", id)
-	if result.Status != "available" || result.LatestVersion != "latest" || result.LatestImageID != newID {
+	if result.Status != "available" || result.LatestVersion != "Build "+strings.TrimPrefix(newID, "sha256:")[:12] || result.LatestImageID != newID {
 		t.Fatalf("%+v", result)
 	}
 }
@@ -214,5 +219,57 @@ func TestResolvePinnedImagePreservesDigestAndChecksPlatform(t *testing.T) {
 	result := ResolveImageUpdate(context.Background(), pin, dockerTypes.ImageInspect{ID: id, Os: "linux", Architecture: "arm64"})
 	if result.Status != "failed" || result.Error == "" {
 		t.Fatalf("wrong platform offered: %+v", result)
+	}
+}
+
+func TestRegistryCheckResolvesVersionsBehindLatest(t *testing.T) {
+	f := newRegistryFixture(t)
+	oldLabels := map[string]string{"build_version": "Linuxserver.io version:- 5.0.3.8127-ls190 Build-date:- 2024-01-01"}
+	newLabels := map[string]string{"build_version": "Linuxserver.io version:- 5.1.0.9000-ls200 Build-date:- 2024-02-01"}
+	oldID := f.addLabeledImage("latest", "amd64", "old", oldLabels)
+	newID := f.addLabeledImage("latest", "amd64", "new", newLabels)
+	f.failTags = true // Do not enumerate arbitrary versions for a floating channel.
+	image := strings.TrimPrefix(f.server.URL, "https://") + "/team/demo:latest"
+	// The running container still references oldID even when latest has moved.
+	installed := dockerTypes.ImageInspect{ID: oldID, Os: "linux", Architecture: "amd64", Config: &container.Config{Labels: oldLabels}}
+	result := ResolveImageUpdate(context.Background(), image, installed)
+	if result.Status != "available" || result.CurrentImageID != oldID || result.LatestImageID != newID || result.CurrentVersion != "5.0.3.8127-ls190" || result.LatestVersion != "5.1.0.9000-ls200" || result.LatestImage != image {
+		t.Fatalf("failed to resolve versions behind latest: %+v", result)
+	}
+	installed.ID, installed.Config.Labels = newID, newLabels
+	result = ResolveImageUpdate(context.Background(), image, installed)
+	if result.Status != "up_to_date" || result.CurrentVersion != result.LatestVersion {
+		t.Fatalf("repeated update: %+v", result)
+	}
+}
+
+func TestImageVersionMetadataAndBuildFallback(t *testing.T) {
+	for _, tc := range []struct {
+		labels    map[string]string
+		tag, want string
+	}{
+		{map[string]string{"org.opencontainers.image.version": "2.36.0"}, "latest", "2.36.0"},
+		{map[string]string{"org.label-schema.version": "3.2.1"}, "stable", "3.2.1"},
+		{map[string]string{"org.opencontainers.image.version": "latest"}, "latest", "Build abcdef012345"},
+		{nil, "latest", "Build abcdef012345"},
+		{nil, "2.36.0", "2.36.0"},
+	} {
+		if got := imageVersion(tc.labels, tc.tag, "sha256:abcdef0123456789"); got != tc.want {
+			t.Fatalf("%+v: %s", tc, got)
+		}
+	}
+}
+
+func TestInstalledVersionTagMustBelongToContainerImage(t *testing.T) {
+	installed := dockerTypes.ImageInspect{ID: "sha256:abcdef0123456789", RepoTags: []string{"demo:1.2.3"}}
+	if got := InstalledImageVersion(installed, "docker.io/library/demo:1.2.3"); got != "1.2.3" {
+		t.Fatal(got)
+	}
+	if got := InstalledImageVersion(installed, "demo:2.0.0"); got != "Build abcdef012345" {
+		t.Fatal("used tag from a different image", got)
+	}
+	installed.RepoTags = []string{"demo:latest"}
+	if got := InstalledImageVersion(installed, "demo:latest"); got != "Build abcdef012345" {
+		t.Fatal("called installed version latest", got)
 	}
 }

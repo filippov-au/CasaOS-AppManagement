@@ -35,6 +35,7 @@ type ImageUpdate struct {
 	Service        string `json:"service"`
 	Image          string `json:"image"`
 	Status         string `json:"status"`
+	CurrentVersion string `json:"current_version,omitempty"`
 	CurrentImageID string `json:"current_image_id,omitempty"`
 	LatestImageID  string `json:"latest_image_id,omitempty"`
 	LatestImage    string `json:"latest_image,omitempty"`
@@ -129,13 +130,15 @@ var errImagePlatform = errors.New("image is unavailable for the installed platfo
 
 // Compare the platform's config digest to Docker's installed image ID. Comparing
 // only an index digest incorrectly flags changes confined to other architectures.
-func platformImageID(ctx context.Context, repo distribution.Repository, tag string, id digest.Digest, platform v1.Platform, depth int) (string, error) {
+type registryImageInfo struct{ ID, Version string }
+
+func platformImageInfo(ctx context.Context, repo distribution.Repository, tag string, id digest.Digest, platform v1.Platform, depth int) (registryImageInfo, error) {
 	if depth > 4 {
-		return "", errors.New("image manifest nesting is too deep")
+		return registryImageInfo{}, errors.New("image manifest nesting is too deep")
 	}
 	manifests, err := repo.Manifests(ctx)
 	if err != nil {
-		return "", err
+		return registryImageInfo{}, err
 	}
 	var options []distribution.ManifestServiceOption
 	if tag != "" {
@@ -143,47 +146,51 @@ func platformImageID(ctx context.Context, repo distribution.Repository, tag stri
 	}
 	manifest, err := manifests.Get(ctx, id, options...)
 	if err != nil {
-		return "", err
+		return registryImageInfo{}, err
 	}
 	_, payload, err := manifest.Payload()
 	if err != nil {
-		return "", err
+		return registryImageInfo{}, err
 	}
 	var document struct {
 		Config    v1.Descriptor   `json:"config"`
 		Manifests []v1.Descriptor `json:"manifests"`
 	}
 	if err := json.Unmarshal(payload, &document); err != nil {
-		return "", err
+		return registryImageInfo{}, err
 	}
 	if len(document.Manifests) > 0 {
 		for _, child := range document.Manifests {
 			p := child.Platform
 			if p != nil && p.OS == platform.OS && p.Architecture == platform.Architecture && (platform.Variant == "" || p.Variant == platform.Variant) {
-				return platformImageID(ctx, repo, "", child.Digest, platform, depth+1)
+				info, err := platformImageInfo(ctx, repo, "", child.Digest, platform, depth+1)
+				if strings.HasPrefix(info.Version, "Build ") {
+					info.Version = imageVersion(nil, tag, info.ID)
+				}
+				return info, err
 			}
 		}
-		return "", errImagePlatform
+		return registryImageInfo{}, errImagePlatform
 	}
 	if err := document.Config.Digest.Validate(); err != nil {
-		return "", errors.New("registry returned an invalid image config digest")
+		return registryImageInfo{}, errors.New("registry returned an invalid image config digest")
 	}
 	// Single-platform manifests have no platform descriptor; inspect their config.
 	config, err := repo.Blobs(ctx).Get(ctx, document.Config.Digest)
 	if err != nil {
-		return "", err
+		return registryImageInfo{}, err
 	}
 	if digest.FromBytes(config) != document.Config.Digest {
-		return "", errors.New("registry image config digest mismatch")
+		return registryImageInfo{}, errors.New("registry image config digest mismatch")
 	}
 	var image v1.Image
 	if err := json.Unmarshal(config, &image); err != nil {
-		return "", err
+		return registryImageInfo{}, err
 	}
 	if image.OS != platform.OS || image.Architecture != platform.Architecture || (platform.Variant != "" && image.Variant != platform.Variant) {
-		return "", errImagePlatform
+		return registryImageInfo{}, errImagePlatform
 	}
-	return document.Config.Digest.String(), nil
+	return registryImageInfo{ID: document.Config.Digest.String(), Version: imageVersion(image.Config.Labels, tag, document.Config.Digest.String())}, nil
 }
 
 var stableVersionTag = regexp.MustCompile(`^v?\d+\.\d+\.\d+$`)
@@ -220,13 +227,13 @@ func CheckImageUpdate(ctx context.Context, image string, installed dockerTypes.I
 	return checkImageUpdate(ctx, image, installed, false)
 }
 
-// ResolveImageUpdate also resolves store-pinned digests for verified installation.
+// ResolveImageUpdate also resolves pinned digests for verified installation.
 func ResolveImageUpdate(ctx context.Context, image string, installed dockerTypes.ImageInspect) ImageUpdate {
 	return checkImageUpdate(ctx, image, installed, true)
 }
 
 func checkImageUpdate(ctx context.Context, image string, installed dockerTypes.ImageInspect, resolvePinned bool) ImageUpdate {
-	result := ImageUpdate{Image: image, CurrentImageID: installed.ID, Status: "failed"}
+	result := ImageUpdate{Image: image, CurrentImageID: installed.ID, CurrentVersion: InstalledImageVersion(installed, image), Status: "failed"}
 	// Error details from authentication may contain token URLs. Expose a safe
 	// actionable message rather than serializing remote errors into app status.
 	result.Error = "Could not check this image registry. Check connectivity, registry credentials and rate limits, then retry."
@@ -247,13 +254,13 @@ func checkImageUpdate(ctx context.Context, image string, installed dockerTypes.I
 		return result
 	}
 	if isPinned {
-		id, err := platformImageID(ctx, repo, "", pinned.Digest(), v1.Platform{OS: installed.Os, Architecture: installed.Architecture, Variant: installed.Variant}, 0)
+		info, err := platformImageInfo(ctx, repo, "", pinned.Digest(), v1.Platform{OS: installed.Os, Architecture: installed.Architecture, Variant: installed.Variant}, 0)
 		if err != nil {
 			return result
 		}
 		result.Status, result.Error = "up_to_date", ""
-		result.LatestImageID, result.LatestImage = id, image
-		if id != installed.ID {
+		result.LatestImageID, result.LatestImage, result.LatestVersion = info.ID, image, info.Version
+		if info.ID != installed.ID {
 			result.Status = "available"
 		}
 		return result
@@ -265,7 +272,7 @@ func checkImageUpdate(ctx context.Context, image string, installed dockerTypes.I
 
 func checkRepositoryImage(ctx context.Context, repo distribution.Repository, named reference.Named, tag string, installed dockerTypes.ImageInspect, result ImageUpdate) ImageUpdate {
 	platform := v1.Platform{OS: installed.Os, Architecture: installed.Architecture, Variant: installed.Variant}
-	latestID, err := platformImageID(ctx, repo, tag, "", platform, 0)
+	latest, err := platformImageInfo(ctx, repo, tag, "", platform, 0)
 	if err != nil {
 		return result
 	}
@@ -281,23 +288,81 @@ func checkRepositoryImage(ctx context.Context, repo distribution.Repository, nam
 				result.Error = "Too many newer tags lack a matching platform. Review the registry manually."
 				return result
 			}
-			id, err := platformImageID(ctx, repo, candidate, "", platform, 0)
+			info, err := platformImageInfo(ctx, repo, candidate, "", platform, 0)
 			if errors.Is(err, errImagePlatform) {
 				continue
 			}
 			if err != nil {
 				return result
 			}
-			latestID, latestTag = id, candidate
+			latest, latestTag = info, candidate
 			break
 		}
 	}
 	result.Status, result.Error = "up_to_date", ""
-	result.LatestVersion, result.LatestImageID = latestTag, latestID
+	result.LatestVersion, result.LatestImageID = latest.Version, latest.ID
 	ref, _ := reference.WithTag(reference.TrimNamed(named), latestTag)
 	result.LatestImage = reference.FamiliarString(ref)
-	if latestID != installed.ID || latestTag != tag {
+	if latest.ID != installed.ID || latestTag != tag {
 		result.Status = "available"
 	}
 	return result
+}
+
+// Version labels describe the image contents. Floating tags such as latest only
+// describe an update channel, so never present them as an installed version.
+var linuxServerBuildVersion = regexp.MustCompile(`(?i)version:-\s*([^\s]+)`)
+var displayVersionTag = regexp.MustCompile(`^v?\d+(\.\d+){1,3}([+_-][A-Za-z0-9._-]+)?$`)
+
+func imageVersion(labels map[string]string, tag, id string) string {
+	for _, key := range []string{"org.opencontainers.image.version", "org.label-schema.version", "build_version"} {
+		value := strings.TrimSpace(labels[key])
+		if key == "build_version" {
+			match := linuxServerBuildVersion.FindStringSubmatch(value)
+			if len(match) != 2 {
+				continue
+			}
+			value = match[1]
+		}
+		if value != "" && len(value) <= 120 && !strings.ContainsAny(value, "\r\n\t") {
+			switch strings.ToLower(value) {
+			case "latest", "stable", "main", "master", "develop", "nightly", "unknown":
+				continue
+			}
+			return value
+		}
+	}
+	if displayVersionTag.MatchString(tag) {
+		return tag
+	}
+	shortID := strings.TrimPrefix(id, "sha256:")
+	if len(shortID) > 12 {
+		shortID = shortID[:12]
+	}
+	if shortID != "" {
+		return "Build " + shortID
+	}
+	return ""
+}
+
+func InstalledImageVersion(installed dockerTypes.ImageInspect, configuredImage string) string {
+	var labels map[string]string
+	if installed.Config != nil {
+		labels = installed.Config.Labels
+	}
+	// Use a version tag only when it still belongs to this exact installed ID.
+	// A newer image pulled under the configured tag must not rename the old one.
+	var versionTag string
+	configured, err := reference.ParseNormalizedNamed(configuredImage)
+	if err == nil {
+		for _, repoTag := range installed.RepoTags {
+			named, err := reference.ParseNormalizedNamed(repoTag)
+			if err == nil && reference.TagNameOnly(named).String() == reference.TagNameOnly(configured).String() {
+				if tagged, ok := named.(reference.Tagged); ok {
+					versionTag = tagged.Tag()
+				}
+			}
+		}
+	}
+	return imageVersion(labels, versionTag, installed.ID)
 }

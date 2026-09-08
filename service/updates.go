@@ -497,6 +497,9 @@ func (m *UpdateManager) run(ctx context.Context, app, target *ComposeApp, r *upd
 	r.Previous = snapshot
 	r.Pending = nil
 	r.Status.CurrentVersion = updateVersion(target)
+	if r.Plan != nil && r.Status.TargetVersion != "" {
+		r.Status.CurrentVersion = r.Status.TargetVersion
+	}
 	r.Status.CheckStatus = "unchecked"
 	r.Status.RegistryImages, r.Status.RegistryCheckedAt = nil, nil
 	r.Plan = nil

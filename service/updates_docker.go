@@ -195,6 +195,19 @@ func (dockerUpdateRuntime) Capture(ctx context.Context, app *ComposeApp) (*updat
 	copy.injectEnvVariableToComposeApp()
 	snapshot := &updateSnapshot{Images: map[string]string{}, CreatedAt: time.Now().UTC()}
 	snapshot.Version = updateVersion(app)
+	main, mainErr := app.MainService()
+	if mainErr != nil || main == nil {
+		if len(app.Services) > 0 {
+			main = (*App)(&app.Services[0])
+		}
+	}
+	if main != nil {
+		installed, _, err := cli.ImageInspectWithRaw(ctx, images[main.Name])
+		if err != nil {
+			return nil, err
+		}
+		snapshot.Version = docker.InstalledImageVersion(installed, main.Image)
+	}
 	success := false
 	defer func() {
 		if !success {

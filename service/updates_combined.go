@@ -1,7 +1,6 @@
 package service
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -10,7 +9,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/IceWhaleTech/CasaOS-AppManagement/common"
 	"github.com/IceWhaleTech/CasaOS-AppManagement/pkg/docker"
 )
 
@@ -58,31 +56,13 @@ func loadCheckedTarget(app *ComposeApp, record *updateRecord) (*ComposeApp, erro
 	return target, nil
 }
 
-func definitionChanged(app, target *ComposeApp) (bool, error) {
-	current, _ := cloneCompose(app)
-	next, _ := cloneCompose(target)
-	for _, project := range []*ComposeApp{current, next} {
-		for i := range project.Services {
-			project.Services[i].Image = ""
-			project.Services[i].PullPolicy = ""
-		}
-	}
-	a, err := resolvedComposeYAML(current)
-	if err != nil {
-		return false, err
-	}
-	b, err := resolvedComposeYAML(next)
-	return !bytes.Equal(a, b), err
-}
-
-// The default check combines refreshed catalog defaults with newer registry
-// images. Explicit legacy store/registry modes remain available to old clients.
+// The default check updates images using the saved app configuration. Marketplace
+// catalogs are installation templates and are never consulted by this flow.
 func (m *UpdateManager) CheckCombined(ctx context.Context, apps map[string]*ComposeApp) error {
 	if !m.checkMu.TryLock() {
 		return ErrAppOperationBusy
 	}
 	defer m.checkMu.Unlock()
-	sourceErrors := refreshUpdateCatalogs()
 	for _, app := range apps {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -118,22 +98,13 @@ func (m *UpdateManager) CheckCombined(ctx context.Context, apps map[string]*Comp
 			s.CurrentVersion = updateVersion(app)
 			var target *ComposeApp
 			if checkErr == nil {
-				target, checkErr = m.target(app)
-			}
-			if errors.Is(checkErr, ErrStoreInfoNotFound) {
-				target, checkErr = cloneCompose(app) // custom Compose apps still receive image updates
-			}
-			if checkErr == nil {
-				if ext, ok := target.Extensions[common.ComposeExtensionNameXCasaOS].(map[string]interface{}); ok {
-					if source, _ := ext["store_url"].(string); sourceErrors[source] != nil {
-						checkErr = errors.New("this app's store could not be refreshed; retry the check")
-					}
-				}
+				target, checkErr = cloneCompose(app)
 			}
 			if checkErr == nil {
 				var images []docker.ImageUpdate
 				images, checkErr = m.resolve(ctx, app, target)
 				s.RegistryImages = images
+				setCheckedVersions(app, images, s)
 				if checkErr == nil {
 					checkErr = prepareCheckedUpdate(app, target, images, r, now)
 				}
@@ -153,10 +124,7 @@ func (m *UpdateManager) CheckCombined(ctx context.Context, apps map[string]*Comp
 }
 
 func prepareCheckedUpdate(app, target *ComposeApp, images []docker.ImageUpdate, r *updateRecord, now time.Time) error {
-	available, err := definitionChanged(app, target)
-	if err != nil {
-		return err
-	}
+	available := false
 	ids := map[string]string{}
 	for _, image := range images {
 		if image.Error != "" || image.LatestImageID == "" || (image.Status != "available" && image.Status != "up_to_date") {
@@ -168,7 +136,7 @@ func prepareCheckedUpdate(app, target *ComposeApp, images []docker.ImageUpdate, 
 	if len(ids) == 0 || len(ids) != len(target.Services) {
 		return errors.New("could not check every app service")
 	}
-	r.Status.TargetVersion = updateVersion(target)
+	setCheckedVersions(app, images, &r.Status)
 	r.Status.CheckStatus = "up_to_date"
 	if !available {
 		return nil

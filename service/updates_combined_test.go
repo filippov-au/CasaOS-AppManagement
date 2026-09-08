@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	"github.com/IceWhaleTech/CasaOS-AppManagement/common"
+	"github.com/IceWhaleTech/CasaOS-AppManagement/pkg/config"
 	"github.com/IceWhaleTech/CasaOS-AppManagement/pkg/docker"
 	"github.com/compose-spec/compose-go/types"
 )
@@ -32,22 +35,21 @@ func combinedFixture(t *testing.T) (*UpdateManager, *fakeUpdateRuntime, *Compose
 	if err != nil {
 		t.Fatal(err)
 	}
-	m.target = func(app *ComposeApp) (*ComposeApp, error) {
-		target, _ := cloneCompose(app)
-		target.Services[0].Image = "ghcr.io/advplyr/audiobookshelf:2.30.0"
-		return target, nil
+	m.target = func(*ComposeApp) (*ComposeApp, error) {
+		t.Fatal("image updates must never look up a marketplace definition")
+		return nil, errors.New("duplicate or unavailable store")
 	}
 	m.resolve = func(_ context.Context, installed, target *ComposeApp) ([]docker.ImageUpdate, error) {
-		if target.Services[0].Image != "ghcr.io/advplyr/audiobookshelf:2.30.0" {
-			t.Fatal("did not start with catalog image")
+		if target.Services[0].Image != "ghcr.io/advplyr/audiobookshelf:2.23.0" {
+			t.Fatal("did not preserve installed image repository and channel")
 		}
 		target.Services[0].Image = "ghcr.io/advplyr/audiobookshelf:2.36.0"
-		return []docker.ImageUpdate{{Service: "web", Image: "ghcr.io/advplyr/audiobookshelf:2.30.0", InstalledImage: installed.Services[0].Image, LatestImage: target.Services[0].Image, LatestImageID: "sha256:" + strings.Repeat("a", 64), Status: "available"}}, nil
+		return []docker.ImageUpdate{{Service: "web", Image: installed.Services[0].Image, CurrentVersion: "2.23.0", LatestVersion: "2.36.0", InstalledImage: installed.Services[0].Image, LatestImage: target.Services[0].Image, LatestImageID: "sha256:" + strings.Repeat("a", 64), Status: "available"}}, nil
 	}
 	return m, runtime, app
 }
 
-func TestCombinedUpdateInstallsOfferedRegistryVersionOverCatalog(t *testing.T) {
+func TestImageUpdateInstallsOfferedRegistryVersionWithoutMarketplace(t *testing.T) {
 	m, runtime, app := combinedFixture(t)
 	if err := m.CheckCombined(context.Background(), map[string]*ComposeApp{app.Name: app}); err != nil {
 		t.Fatal(err)
@@ -156,50 +158,47 @@ func TestCombinedUpdateVerifiesImagesBeforeReplacingContainers(t *testing.T) {
 	}
 }
 
-func TestCatalogDefaultsPreserveSettingsAndBecomeCurrentAfterInstall(t *testing.T) {
-	_, _, app := updateFixture(t)
-	value := "my-secret"
-	app.Services[0].Environment = types.MappingWithEquals{"PASSWORD": &value}
-	app.Services[0].Volumes = []types.ServiceVolumeConfig{{Type: "bind", Source: "/custom/data", Target: "/data"}}
-	store, _ := cloneCompose(app)
-	newDefault := "new-default"
-	store.Services[0].Environment["NEW_SETTING"] = &newDefault
-	differentPassword := "store-password"
-	store.Services[0].Environment["PASSWORD"] = &differentPassword
-	store.Services[0].Volumes[0].Source = "/store/data"
-	store.Services[0].HealthCheck = &types.HealthCheckConfig{Test: types.HealthCheckTest{"CMD", "true"}}
-	store.Extensions[common.ComposeExtensionNameXCasaOS].(map[string]interface{})["icon"] = "https://example.com/new.png"
-	target, err := mergeStoreImages(app, store)
+func TestImageUpdatesIgnoreDuplicateAndOfflineMarketplaces(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	previous := config.ServerInfo.AppStoreList
+	config.ServerInfo.AppStoreList = []string{server.URL, server.URL}
+	defer func() { config.ServerInfo.AppStoreList = previous }()
+	m, _, app := combinedFixture(t)
+	ext := app.Extensions[common.ComposeExtensionNameXCasaOS].(map[string]interface{})
+	ext["store_url"] = server.URL
+	data, _ := resolvedComposeYAML(app)
+	if err := os.WriteFile(app.ComposeFiles[0], data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.CheckCombined(context.Background(), map[string]*ComposeApp{app.Name: app}); err != nil {
+		t.Fatal(err)
+	}
+	record, _ := m.read(app.Name)
+	if record.Plan == nil || record.Status.CheckStatus != "available" || requests != 0 {
+		t.Fatalf("marketplace blocked image update: %+v, requests=%d", record.Status, requests)
+	}
+	target, err := loadCheckedTarget(app, record)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if *target.Services[0].Environment["PASSWORD"] != value || *target.Services[0].Environment["NEW_SETTING"] != newDefault || target.Services[0].Volumes[0].Source != "/custom/data" || target.Services[0].HealthCheck == nil {
-		t.Fatal("store defaults or installed settings lost")
-	}
-	changed, err := definitionChanged(app, target)
-	if err != nil || !changed {
-		t.Fatal("catalog-only update missed", err)
-	}
-	next, err := mergeStoreImages(target, store)
-	if err != nil {
-		t.Fatal(err)
-	}
-	changed, err = definitionChanged(target, next)
-	if err != nil || changed {
-		t.Fatal("catalog update repeats forever", err)
+	if *target.Services[0].Environment["PASSWORD"] != "preserve$secret" {
+		t.Fatal("installed settings changed")
 	}
 }
 
-func TestUpdateImageBaselineNeverDowngradesOrUnpins(t *testing.T) {
-	for _, tc := range []struct{ installed, catalog, want string }{
-		{"app:2.36.0", "app:2.30.0", "app:2.36.0"},
-		{"app:2.23.0", "app:2.30.0", "app:2.30.0"},
-		{"app:latest", "app:stable", "app:stable"},
-		{"old/app:2.36.0", "new/app:3.0.0", "new/app:3.0.0"},
-		{"app@sha256:" + strings.Repeat("a", 64), "app:2.30.0", "app@sha256:" + strings.Repeat("a", 64)},
-	} {
-		if got := updateImageBaseline(tc.installed, tc.catalog); got != tc.want {
-			t.Fatalf("%s: %s", tc.installed, got)
-		}
+func TestCheckedVersionsUseMainServiceImageMetadata(t *testing.T) {
+	_, _, app := combinedFixture(t)
+	status := AppUpdateStatus{}
+	setCheckedVersions(app, []docker.ImageUpdate{
+		{Service: "sidecar", CurrentVersion: "wrong", LatestVersion: "wrong"},
+		{Service: "web", CurrentVersion: "5.0.0-ls1", LatestVersion: "5.1.0-ls2"},
+	}, &status)
+	if status.CurrentVersion != "5.0.0-ls1" || status.TargetVersion != "5.1.0-ls2" {
+		t.Fatalf("%+v", status)
 	}
 }

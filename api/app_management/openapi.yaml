@@ -326,7 +326,7 @@ paths:
                     description: Whether direct registry checks are supported
                   combined_updates_supported:
                     type: boolean
-                    description: Whether the default check prepares installable catalog and registry updates
+                    description: Whether the default check prepares verified image updates independently of marketplaces
                   data:
                     type: array
                     items:
@@ -335,13 +335,13 @@ paths:
           $ref: "#/components/responses/ResponseInternalServerError"
   /updates/check:
     post:
-      summary: Refresh App Store definitions and prepare updates with newer registry images, without pulling layers
+      summary: Check installed images against registries and prepare verified updates, without pulling layers
       operationId: checkAppUpdates
       tags: [Compose methods]
       parameters:
         - name: source
           in: query
-          description: Optional legacy mode. Omit to combine refreshed catalog defaults and registry images into a verified installable update.
+          description: Optional legacy mode. Omit to check registry images using the installed configuration, without consulting marketplaces.
           schema:
             type: string
             enum: [store, registry]
@@ -578,7 +578,7 @@ paths:
     patch:
       summary: Install a checked app update with rollback protection
       description: |
-        Install the catalog definition and registry images prepared by the latest combined check.
+        Install the registry images prepared by the latest check, preserving the installed app configuration.
         The optional update_token rejects changes to the reviewed update. Legacy clients without a combined check retain the store update behavior.
       operationId: updateComposeApp
       tags:
@@ -1312,6 +1312,9 @@ components:
         status:
           type: string
           enum: [available, up_to_date, pinned, unsupported, failed]
+        current_version:
+          type: string
+          description: Version from installed image labels, or an immutable build ID when unpublished
         current_image_id:
           type: string
           description: Installed platform image config digest
@@ -1322,7 +1325,7 @@ components:
           type: string
         latest_version:
           type: string
-          description: Highest supported stable x.y.z tag with the same v prefix, or the configured floating/custom tag
+          description: Version resolved from registry image metadata or a version tag, with a build ID fallback
         error:
           type: string
     AppUpdateStatus:
