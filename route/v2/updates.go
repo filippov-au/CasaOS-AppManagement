@@ -23,7 +23,7 @@ func (a *AppManagement) AppUpdates(ctx echo.Context) error {
 	if err != nil {
 		return updateError(ctx, err)
 	}
-	return ctx.JSON(http.StatusOK, map[string]interface{}{"data": statuses, "registry_supported": true})
+	return ctx.JSON(http.StatusOK, map[string]interface{}{"data": statuses, "registry_supported": true, "combined_updates_supported": true})
 }
 func (a *AppManagement) CheckAppUpdates(ctx echo.Context, params codegen.CheckAppUpdatesParams) error {
 	if params.Source != nil && *params.Source != "registry" && *params.Source != "store" {
@@ -36,9 +36,12 @@ func (a *AppManagement) CheckAppUpdates(ctx echo.Context, params codegen.CheckAp
 	if err := service.Updates.RecoverApps(apps); err != nil {
 		return updateError(ctx, err)
 	}
-	check := service.Updates.Check
-	if params.Source != nil && *params.Source == "registry" {
-		check = service.Updates.CheckRegistry
+	check := service.Updates.CheckCombined
+	if params.Source != nil {
+		check = service.Updates.Check
+		if *params.Source == "registry" {
+			check = service.Updates.CheckRegistry
+		}
 	}
 	if err := check(ctx.Request().Context(), apps); err != nil {
 		return updateError(ctx, err)
@@ -65,7 +68,7 @@ func (a *AppManagement) RollbackComposeApp(ctx echo.Context, id codegen.ComposeA
 }
 func updateError(ctx echo.Context, err error) error {
 	status := http.StatusInternalServerError
-	if errors.Is(err, service.ErrAppOperationBusy) {
+	if errors.Is(err, service.ErrAppOperationBusy) || errors.Is(err, service.ErrUpdatePlanStale) {
 		status = http.StatusConflict
 	}
 	return ctx.JSON(status, map[string]string{"message": err.Error()})

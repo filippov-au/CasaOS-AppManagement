@@ -324,6 +324,9 @@ paths:
                   registry_supported:
                     type: boolean
                     description: Whether direct registry checks are supported
+                  combined_updates_supported:
+                    type: boolean
+                    description: Whether the default check prepares installable catalog and registry updates
                   data:
                     type: array
                     items:
@@ -332,17 +335,16 @@ paths:
           $ref: "#/components/responses/ResponseInternalServerError"
   /updates/check:
     post:
-      summary: Check installed app images in registries or refresh App Store updates without pulling images
+      summary: Refresh App Store definitions and prepare updates with newer registry images, without pulling layers
       operationId: checkAppUpdates
       tags: [Compose methods]
       parameters:
         - name: source
           in: query
-          description: Registry checks are advisory and include custom apps. Defaults to the legacy App Store check.
+          description: Optional legacy mode. Omit to combine refreshed catalog defaults and registry images into a verified installable update.
           schema:
             type: string
             enum: [store, registry]
-            default: store
       responses:
         "200":
           description: Refreshed statuses, including per-app check failures
@@ -352,6 +354,8 @@ paths:
                 type: object
                 properties:
                   registry_supported:
+                    type: boolean
+                  combined_updates_supported:
                     type: boolean
                   data:
                     type: array
@@ -572,15 +576,21 @@ paths:
           $ref: "#/components/responses/ResponseInternalServerError"
 
     patch:
-      summary: Update container images of compose app to match the compose app in AppStore.
+      summary: Install a checked app update with rollback protection
       description: |
-        Update a ComposeApp to the latest version of the app in the AppStore.
+        Install the catalog definition and registry images prepared by the latest combined check.
+        The optional update_token rejects changes to the reviewed update. Legacy clients without a combined check retain the store update behavior.
       operationId: updateComposeApp
       tags:
         - Compose methods
       parameters:
         - $ref: "#/components/parameters/ComposeAppID"
         - $ref: "#/components/parameters/Force"
+        - name: update_token
+          in: query
+          schema:
+            type: string
+          description: Token returned with update_ready; a stale token returns HTTP 409
       responses:
         "200":
           $ref: "#/components/responses/ComposeAppUpdateOK"
@@ -1296,6 +1306,9 @@ components:
           type: string
         image:
           type: string
+        installed_image:
+          type: string
+          description: Installed service image reference before applying the checked update
         status:
           type: string
           enum: [available, up_to_date, pinned, unsupported, failed]
@@ -1316,6 +1329,12 @@ components:
       type: object
       required: [id, title, icon, current_version, check_status, operation, rollback_available]
       properties:
+        update_ready:
+          type: boolean
+          description: A checked installation plan exists and no failed update requires recovery first
+        update_token:
+          type: string
+          description: Identifies the checked update to install; contains no configuration or credentials
         registry_images:
           type: array
           items:

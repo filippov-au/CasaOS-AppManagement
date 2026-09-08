@@ -40,6 +40,7 @@ type ImageUpdate struct {
 	LatestImage    string `json:"latest_image,omitempty"`
 	LatestVersion  string `json:"latest_version,omitempty"`
 	Error          string `json:"error,omitempty"`
+	InstalledImage string `json:"installed_image,omitempty"`
 }
 
 // Attach the caller's deadline to registry requests, including the authentication
@@ -216,6 +217,15 @@ func newerStableTags(current string, tags []string) []string {
 }
 
 func CheckImageUpdate(ctx context.Context, image string, installed dockerTypes.ImageInspect) ImageUpdate {
+	return checkImageUpdate(ctx, image, installed, false)
+}
+
+// ResolveImageUpdate also resolves store-pinned digests for verified installation.
+func ResolveImageUpdate(ctx context.Context, image string, installed dockerTypes.ImageInspect) ImageUpdate {
+	return checkImageUpdate(ctx, image, installed, true)
+}
+
+func checkImageUpdate(ctx context.Context, image string, installed dockerTypes.ImageInspect, resolvePinned bool) ImageUpdate {
 	result := ImageUpdate{Image: image, CurrentImageID: installed.ID, Status: "failed"}
 	// Error details from authentication may contain token URLs. Expose a safe
 	// actionable message rather than serializing remote errors into app status.
@@ -225,18 +235,31 @@ func CheckImageUpdate(ctx context.Context, image string, installed dockerTypes.I
 		result.Error = "This service does not reference a registry image."
 		return result
 	}
-	if _, pinned := named.(reference.Canonical); pinned {
+	pinned, isPinned := named.(reference.Canonical)
+	if isPinned && !resolvePinned {
 		result.Status, result.Error = "pinned", ""
 		return result
 	}
-	named = reference.TagNameOnly(named)
-	tag := named.(reference.Tagged).Tag()
 	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	repo, err := imageRepository(ctx, named)
 	if err != nil {
 		return result
 	}
+	if isPinned {
+		id, err := platformImageID(ctx, repo, "", pinned.Digest(), v1.Platform{OS: installed.Os, Architecture: installed.Architecture, Variant: installed.Variant}, 0)
+		if err != nil {
+			return result
+		}
+		result.Status, result.Error = "up_to_date", ""
+		result.LatestImageID, result.LatestImage = id, image
+		if id != installed.ID {
+			result.Status = "available"
+		}
+		return result
+	}
+	named = reference.TagNameOnly(named)
+	tag := named.(reference.Tagged).Tag()
 	return checkRepositoryImage(ctx, repo, named, tag, installed, result)
 }
 

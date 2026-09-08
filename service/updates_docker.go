@@ -19,6 +19,7 @@ import (
 	dockerTypes "github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/client"
+	"github.com/imdario/mergo"
 	"github.com/mohae/deepcopy"
 	"gopkg.in/yaml.v3"
 )
@@ -110,14 +111,44 @@ func mergeStoreImages(app, store *ComposeApp) (*ComposeApp, error) {
 	if err != nil {
 		return nil, err
 	}
+	store, err = cloneCompose(store)
+	if err != nil {
+		return nil, err
+	}
 	for i, s := range target.Services {
 		other := store.App(s.Name)
 		if other == nil || other.Image == "" {
 			return nil, ErrComposeAppNotMatch
 		}
+		// Add current catalog defaults while retaining explicit installed settings,
+		// especially data mounts, ports, commands and credential values.
+		if err := mergo.Merge(&target.Services[i], types.ServiceConfig(*other)); err != nil {
+			return nil, err
+		}
 		target.Services[i].Image = other.Image
 		target.Services[i].PullPolicy = "never" // downloads are explicit and verified before any replacement
 		target.Services[i].Build = nil
+	}
+	if err := mergo.Merge(&target.Volumes, store.Volumes); err != nil {
+		return nil, err
+	}
+	if err := mergo.Merge(&target.Networks, store.Networks); err != nil {
+		return nil, err
+	}
+	if err := mergo.Merge(&target.Configs, store.Configs); err != nil {
+		return nil, err
+	}
+	if err := mergo.Merge(&target.Secrets, store.Secrets); err != nil {
+		return nil, err
+	}
+	if installed, ok := target.Extensions[common.ComposeExtensionNameXCasaOS].(map[string]interface{}); ok {
+		if metadata, ok := store.Extensions[common.ComposeExtensionNameXCasaOS].(map[string]interface{}); ok {
+			for _, key := range []string{"description", "tagline", "icon", "thumbnail", "screenshot_link", "author", "developer", "category", "architectures", "tips", "changelog"} {
+				if value, exists := metadata[key]; exists {
+					installed[key] = value
+				}
+			}
+		}
 	}
 	target.injectEnvVariableToComposeApp()
 	return target, nil
@@ -163,7 +194,7 @@ func (dockerUpdateRuntime) Capture(ctx context.Context, app *ComposeApp) (*updat
 	}
 	copy.injectEnvVariableToComposeApp()
 	snapshot := &updateSnapshot{Images: map[string]string{}, CreatedAt: time.Now().UTC()}
-	snapshot.Version, _ = app.MainTag()
+	snapshot.Version = updateVersion(app)
 	success := false
 	defer func() {
 		if !success {
@@ -251,6 +282,24 @@ func (dockerUpdateRuntime) Pull(ctx context.Context, app *ComposeApp) error {
 	for _, s := range app.Services {
 		if err := docker.PullImage(ctx, s.Image, nil); err != nil {
 			return fmt.Errorf("could not download service %s: %w", s.Name, err)
+		}
+	}
+	return nil
+}
+
+func (dockerUpdateRuntime) Verify(ctx context.Context, app *ComposeApp, expected map[string]string) error {
+	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	if err != nil {
+		return err
+	}
+	defer cli.Close()
+	for _, service := range app.Services {
+		image, _, err := cli.ImageInspectWithRaw(ctx, service.Image)
+		if err != nil {
+			return err
+		}
+		if expected[service.Name] == "" || image.ID != expected[service.Name] {
+			return fmt.Errorf("the image for %s changed since the update check; check for updates again", service.Name)
 		}
 	}
 	return nil

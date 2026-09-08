@@ -33,6 +33,9 @@ func (f *fakeUpdateRuntime) Capture(context.Context, *ComposeApp) (*updateSnapsh
 	return f.snapshot, f.call("capture")
 }
 func (f *fakeUpdateRuntime) Pull(context.Context, *ComposeApp) error { return f.call("pull") }
+func (f *fakeUpdateRuntime) Verify(context.Context, *ComposeApp, map[string]string) error {
+	return f.call("verify")
+}
 func (f *fakeUpdateRuntime) Apply(_ context.Context, _ *ComposeApp, b []byte) error {
 	f.applied = b
 	return f.call("apply")

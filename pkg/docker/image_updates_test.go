@@ -194,3 +194,25 @@ func TestRegistryCheckDoesNotHideFailuresOrFollowPinnedDigests(t *testing.T) {
 		t.Fatalf("cancel ignored: %+v", result)
 	}
 }
+
+func TestResolvePinnedImagePreservesDigestAndChecksPlatform(t *testing.T) {
+	f := newRegistryFixture(t)
+	id := f.addImage("1.0.0", "amd64", "1")
+	f.addImage("2.0.0", "amd64", "2")
+	f.failTags = true
+	pin := strings.TrimPrefix(f.server.URL, "https://") + "/team/demo@" + digest.FromBytes(f.manifests["1.0.0"]).String()
+	for _, installedID := range []string{id, "sha256:" + strings.Repeat("a", 64)} {
+		result := ResolveImageUpdate(context.Background(), pin, dockerTypes.ImageInspect{ID: installedID, Os: "linux", Architecture: "amd64"})
+		status := "up_to_date"
+		if installedID != id {
+			status = "available"
+		}
+		if result.Status != status || result.LatestImage != pin || result.LatestImageID != id || result.Error != "" {
+			t.Fatalf("pin changed or not verified: %+v", result)
+		}
+	}
+	result := ResolveImageUpdate(context.Background(), pin, dockerTypes.ImageInspect{ID: id, Os: "linux", Architecture: "arm64"})
+	if result.Status != "failed" || result.Error == "" {
+		t.Fatalf("wrong platform offered: %+v", result)
+	}
+}

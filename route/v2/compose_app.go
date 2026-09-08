@@ -422,7 +422,7 @@ func (a *AppManagement) UpdateComposeApp(ctx echo.Context, id codegen.ComposeApp
 		return ctx.JSON(http.StatusNotFound, codegen.ResponseNotFound{Message: &message})
 	}
 
-	if params.Force != nil && !*params.Force {
+	if params.Force != nil && !*params.Force && params.UpdateToken == nil {
 		// check if updateAvailable
 		if !service.MyService.AppStoreManagement().IsUpdateAvailable(composeApp) {
 			message := fmt.Sprintf("compose app `%s` is up to date", id)
@@ -432,8 +432,12 @@ func (a *AppManagement) UpdateComposeApp(ctx echo.Context, id codegen.ComposeApp
 
 	backgroundCtx := common.WithProperties(context.Background(), PropertiesFromQueryParams(ctx))
 
-	if err := composeApp.Update(backgroundCtx); err != nil {
-		if errors.Is(err, service.ErrAppOperationBusy) {
+	startUpdate := func() error { return composeApp.Update(backgroundCtx) }
+	if params.UpdateToken != nil {
+		startUpdate = func() error { return service.Updates.StartChecked(backgroundCtx, composeApp, *params.UpdateToken) }
+	}
+	if err := startUpdate(); err != nil {
+		if errors.Is(err, service.ErrAppOperationBusy) || errors.Is(err, service.ErrUpdatePlanStale) {
 			return updateError(ctx, err)
 		}
 		logger.Error("failed to update compose app", zap.Error(err), zap.String("appID", id))

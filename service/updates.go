@@ -29,6 +29,8 @@ func LockAppOperation(id string) (func(), error) {
 func appOperationBusy(id string) bool { _, ok := appOperations.Load(id); return ok }
 
 type AppUpdateStatus struct {
+	UpdateReady       bool                 `json:"update_ready"`
+	UpdateToken       string               `json:"update_token,omitempty"`
 	RegistryImages    []docker.ImageUpdate `json:"registry_images,omitempty"`
 	RegistryCheckedAt *time.Time           `json:"registry_checked_at,omitempty"`
 	ID                string               `json:"id"`
@@ -55,6 +57,8 @@ type updateSnapshot struct {
 }
 
 type updateRecord struct {
+	Plan       *appUpdatePlan  `json:"plan,omitempty"`
+	Combined   bool            `json:"combined,omitempty"`
 	ConfigFile string          `json:"config_file,omitempty"`
 	Active     *updateSnapshot `json:"active,omitempty"` // restored images referenced by the current Compose file
 	Status     AppUpdateStatus `json:"status"`
@@ -69,6 +73,7 @@ type updateRuntime interface {
 	Available(context.Context, *updateSnapshot) error
 	Release(context.Context, *updateSnapshot)
 	Check(context.Context, *ComposeApp, *ComposeApp) (bool, error)
+	Verify(context.Context, *ComposeApp, map[string]string) error
 }
 
 type UpdateManager struct {
@@ -78,6 +83,7 @@ type UpdateManager struct {
 	runtime       updateRuntime
 	target        func(*ComposeApp) (*ComposeApp, error)
 	registryCheck func(context.Context, *ComposeApp) []docker.ImageUpdate
+	resolve       func(context.Context, *ComposeApp, *ComposeApp) ([]docker.ImageUpdate, error)
 }
 
 var Updates = &UpdateManager{
@@ -85,6 +91,7 @@ var Updates = &UpdateManager{
 	runtime:       dockerUpdateRuntime{},
 	target:        storeUpdateTarget,
 	registryCheck: checkAppRegistryImages,
+	resolve:       resolveAppUpdateImages,
 }
 
 // Registry discovery is independent of store eligibility and never prepares an
@@ -202,6 +209,10 @@ func (m *UpdateManager) Status(ctx context.Context, app *ComposeApp) (AppUpdateS
 		return AppUpdateStatus{}, err
 	}
 	s := r.Status
+	s.UpdateReady = r.Plan != nil && s.CheckStatus == "available" && r.Pending == nil
+	if s.UpdateReady {
+		s.UpdateToken = r.Plan.Token
+	}
 	s.Title = map[string]string{"en_us": app.Name}
 	if info, err := app.StoreInfo(false); err == nil && info != nil {
 		if info.Title != nil {
@@ -251,21 +262,7 @@ func (m *UpdateManager) Check(ctx context.Context, apps map[string]*ComposeApp) 
 		return ErrAppOperationBusy
 	}
 	defer m.checkMu.Unlock()
-	// Refresh each configured source and retain its failure instead of reporting stale data as current.
-	sourceErrors := map[string]error{}
-	for _, source := range config.ServerInfo.AppStoreList {
-		store, err := AppStoreByURL(source)
-		if err == nil {
-			if source, ok := store.(*appStore); ok {
-				err = source.refreshCatalog(true)
-			} else {
-				err = store.UpdateCatalog()
-			}
-		}
-		if err != nil {
-			sourceErrors[source] = err
-		}
-	}
+	sourceErrors := refreshUpdateCatalogs()
 	for _, app := range apps {
 		unlock, err := LockAppOperation(app.Name)
 		if err != nil {
@@ -280,6 +277,7 @@ func (m *UpdateManager) Check(ctx context.Context, apps map[string]*ComposeApp) 
 				return err
 			}
 			target, checkErr := m.target(app)
+			r.Plan, r.Combined = nil, false
 			s := &r.Status
 			now := time.Now().UTC()
 			s.CheckedAt = &now
@@ -322,6 +320,17 @@ func (m *UpdateManager) Check(ctx context.Context, apps map[string]*ComposeApp) 
 
 // Start reserves the app synchronously so repeated requests cannot launch competing jobs.
 func (m *UpdateManager) Start(ctx context.Context, app *ComposeApp, rollback bool) error {
+	return m.start(ctx, app, rollback, "")
+}
+
+func (m *UpdateManager) StartChecked(ctx context.Context, app *ComposeApp, token string) error {
+	if token == "" {
+		return ErrUpdatePlanStale
+	}
+	return m.start(ctx, app, false, token)
+}
+
+func (m *UpdateManager) start(ctx context.Context, app *ComposeApp, rollback bool, token string) error {
 	unlock, err := LockAppOperation(app.Name)
 	if err != nil {
 		return err
@@ -340,15 +349,27 @@ func (m *UpdateManager) Start(ctx context.Context, app *ComposeApp, rollback boo
 	if err != nil {
 		return err
 	}
+	m.mu.Lock()
+	r, err := m.read(app.Name)
+	m.mu.Unlock()
+	if err != nil {
+		return err
+	}
 	var target *ComposeApp
 	if !rollback {
-		target, err = m.target(app)
+		if token != "" && (r.Plan == nil || r.Plan.Token != token) {
+			return ErrUpdatePlanStale
+		}
+		if r.Combined {
+			target, err = loadCheckedTarget(app, r)
+		} else {
+			target, err = m.target(app)
+		}
 		if err != nil {
 			return err
 		}
 	}
 	m.mu.Lock()
-	r, err := m.read(app.Name)
 	if err == nil {
 		if rollback && recoverySnapshot(r) == nil {
 			err = errors.New("no previous version has been saved")
@@ -425,6 +446,7 @@ func (m *UpdateManager) run(ctx context.Context, app, target *ComposeApp, r *upd
 		r.Status.Operation = "reverted"
 		r.Status.CheckStatus = "unchecked"
 		r.Status.RegistryImages, r.Status.RegistryCheckedAt = nil, nil
+		r.Plan = nil
 		if err := m.stage(app.Name, r, "reverted"); err != nil {
 			return err
 		}
@@ -448,7 +470,11 @@ func (m *UpdateManager) run(ctx context.Context, app, target *ComposeApp, r *upd
 	if err := m.stage(app.Name, r, "pulling"); err != nil {
 		return err
 	}
-	if err := m.runtime.Pull(ctx, target); err != nil {
+	err = m.runtime.Pull(ctx, target)
+	if err == nil && r.Plan != nil {
+		err = m.runtime.Verify(ctx, target, r.Plan.ImageIDs)
+	}
+	if err != nil {
 		r.Pending = nil
 		if saveErr := m.stage(app.Name, r, "failed"); saveErr != nil {
 			r.Pending = snapshot
@@ -470,9 +496,10 @@ func (m *UpdateManager) run(ctx context.Context, app, target *ComposeApp, r *upd
 	old := r.Previous
 	r.Previous = snapshot
 	r.Pending = nil
-	r.Status.CurrentVersion, _ = target.MainTag()
+	r.Status.CurrentVersion = updateVersion(target)
 	r.Status.CheckStatus = "unchecked"
 	r.Status.RegistryImages, r.Status.RegistryCheckedAt = nil, nil
+	r.Plan = nil
 	if err := m.stage(app.Name, r, "updated"); err != nil {
 		return err
 	}
@@ -512,9 +539,10 @@ func (m *UpdateManager) SettingsChanged(app *ComposeApp) error {
 	if err != nil {
 		return err
 	}
-	r.Status.CurrentVersion, _ = app.MainTag()
+	r.Status.CurrentVersion = updateVersion(app)
 	r.Status.CheckStatus = "unchecked"
 	r.Status.RegistryImages, r.Status.RegistryCheckedAt = nil, nil
+	r.Plan = nil
 	return m.save(app.Name, r)
 }
 
@@ -556,4 +584,22 @@ func (m *UpdateManager) RecoverApps(apps map[string]*ComposeApp) error {
 		apps[r.Status.ID] = app
 	}
 	return nil
+}
+
+func refreshUpdateCatalogs() map[string]error {
+	sourceErrors := map[string]error{}
+	for _, source := range config.ServerInfo.AppStoreList {
+		store, err := AppStoreByURL(source)
+		if err == nil {
+			if source, ok := store.(*appStore); ok {
+				err = source.refreshCatalog(true)
+			} else {
+				err = store.UpdateCatalog()
+			}
+		}
+		if err != nil {
+			sourceErrors[source] = err
+		}
+	}
+	return sourceErrors
 }
