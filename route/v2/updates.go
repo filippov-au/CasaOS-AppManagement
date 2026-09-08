@@ -23,9 +23,12 @@ func (a *AppManagement) AppUpdates(ctx echo.Context) error {
 	if err != nil {
 		return updateError(ctx, err)
 	}
-	return ctx.JSON(http.StatusOK, map[string]interface{}{"data": statuses})
+	return ctx.JSON(http.StatusOK, map[string]interface{}{"data": statuses, "registry_supported": true})
 }
-func (a *AppManagement) CheckAppUpdates(ctx echo.Context) error {
+func (a *AppManagement) CheckAppUpdates(ctx echo.Context, params codegen.CheckAppUpdatesParams) error {
+	if params.Source != nil && *params.Source != "registry" && *params.Source != "store" {
+		return echo.NewHTTPError(http.StatusBadRequest, "source must be registry or store")
+	}
 	apps, err := service.MyService.Compose().List(ctx.Request().Context())
 	if err != nil {
 		return updateError(ctx, err)
@@ -33,7 +36,11 @@ func (a *AppManagement) CheckAppUpdates(ctx echo.Context) error {
 	if err := service.Updates.RecoverApps(apps); err != nil {
 		return updateError(ctx, err)
 	}
-	if err := service.Updates.Check(ctx.Request().Context(), apps); err != nil {
+	check := service.Updates.Check
+	if params.Source != nil && *params.Source == "registry" {
+		check = service.Updates.CheckRegistry
+	}
+	if err := check(ctx.Request().Context(), apps); err != nil {
 		return updateError(ctx, err)
 	}
 	return a.AppUpdates(ctx)

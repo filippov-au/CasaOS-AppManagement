@@ -321,6 +321,9 @@ paths:
                 type: object
                 required: [data]
                 properties:
+                  registry_supported:
+                    type: boolean
+                    description: Whether direct registry checks are supported
                   data:
                     type: array
                     items:
@@ -329,9 +332,17 @@ paths:
           $ref: "#/components/responses/ResponseInternalServerError"
   /updates/check:
     post:
-      summary: Refresh store catalogs and check every installed app without pulling images
+      summary: Check installed app images in registries or refresh App Store updates without pulling images
       operationId: checkAppUpdates
       tags: [Compose methods]
+      parameters:
+        - name: source
+          in: query
+          description: Registry checks are advisory and include custom apps. Defaults to the legacy App Store check.
+          schema:
+            type: string
+            enum: [store, registry]
+            default: store
       responses:
         "200":
           description: Refreshed statuses, including per-app check failures
@@ -340,6 +351,8 @@ paths:
               schema:
                 type: object
                 properties:
+                  registry_supported:
+                    type: boolean
                   data:
                     type: array
                     items:
@@ -1275,10 +1288,41 @@ components:
                     items:
                       $ref: "#/components/schemas/WebAppGridItem"
   schemas:
+    RegistryImageUpdate:
+      type: object
+      required: [service, image, status]
+      properties:
+        service:
+          type: string
+        image:
+          type: string
+        status:
+          type: string
+          enum: [available, up_to_date, pinned, unsupported, failed]
+        current_image_id:
+          type: string
+          description: Installed platform image config digest
+        latest_image_id:
+          type: string
+          description: Registry platform image config digest
+        latest_image:
+          type: string
+        latest_version:
+          type: string
+          description: Highest supported stable x.y.z tag with the same v prefix, or the configured floating/custom tag
+        error:
+          type: string
     AppUpdateStatus:
       type: object
       required: [id, title, icon, current_version, check_status, operation, rollback_available]
       properties:
+        registry_images:
+          type: array
+          items:
+            $ref: "#/components/schemas/RegistryImageUpdate"
+        registry_checked_at:
+          type: string
+          format: date-time
         id:
           type: string
         title:

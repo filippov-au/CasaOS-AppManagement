@@ -13,6 +13,7 @@ import (
 
 	"github.com/IceWhaleTech/CasaOS-AppManagement/common"
 	"github.com/IceWhaleTech/CasaOS-AppManagement/pkg/config"
+	"github.com/IceWhaleTech/CasaOS-AppManagement/pkg/docker"
 )
 
 var ErrAppOperationBusy = errors.New("another operation is already running for this app")
@@ -28,20 +29,22 @@ func LockAppOperation(id string) (func(), error) {
 func appOperationBusy(id string) bool { _, ok := appOperations.Load(id); return ok }
 
 type AppUpdateStatus struct {
-	ID                string            `json:"id"`
-	Title             map[string]string `json:"title"`
-	Icon              string            `json:"icon"`
-	CurrentVersion    string            `json:"current_version"`
-	TargetVersion     string            `json:"target_version,omitempty"`
-	CheckStatus       string            `json:"check_status"`
-	CheckedAt         *time.Time        `json:"checked_at,omitempty"`
-	CheckError        string            `json:"check_error,omitempty"`
-	Operation         string            `json:"operation"`
-	Error             string            `json:"error,omitempty"`
-	RollbackAvailable bool              `json:"rollback_available"`
-	RollbackVersion   string            `json:"rollback_version,omitempty"`
-	RollbackDate      *time.Time        `json:"rollback_date,omitempty"`
-	RollbackReason    string            `json:"rollback_reason,omitempty"`
+	RegistryImages    []docker.ImageUpdate `json:"registry_images,omitempty"`
+	RegistryCheckedAt *time.Time           `json:"registry_checked_at,omitempty"`
+	ID                string               `json:"id"`
+	Title             map[string]string    `json:"title"`
+	Icon              string               `json:"icon"`
+	CurrentVersion    string               `json:"current_version"`
+	TargetVersion     string               `json:"target_version,omitempty"`
+	CheckStatus       string               `json:"check_status"`
+	CheckedAt         *time.Time           `json:"checked_at,omitempty"`
+	CheckError        string               `json:"check_error,omitempty"`
+	Operation         string               `json:"operation"`
+	Error             string               `json:"error,omitempty"`
+	RollbackAvailable bool                 `json:"rollback_available"`
+	RollbackVersion   string               `json:"rollback_version,omitempty"`
+	RollbackDate      *time.Time           `json:"rollback_date,omitempty"`
+	RollbackReason    string               `json:"rollback_reason,omitempty"`
 }
 
 type updateSnapshot struct {
@@ -69,17 +72,55 @@ type updateRuntime interface {
 }
 
 type UpdateManager struct {
-	mu      sync.Mutex
-	checkMu sync.Mutex
-	root    func() string
-	runtime updateRuntime
-	target  func(*ComposeApp) (*ComposeApp, error)
+	mu            sync.Mutex
+	checkMu       sync.Mutex
+	root          func() string
+	runtime       updateRuntime
+	target        func(*ComposeApp) (*ComposeApp, error)
+	registryCheck func(context.Context, *ComposeApp) []docker.ImageUpdate
 }
 
 var Updates = &UpdateManager{
-	root:    func() string { return filepath.Join(filepath.Dir(config.AppInfo.AppsPath), "app-updates") },
-	runtime: dockerUpdateRuntime{},
-	target:  storeUpdateTarget,
+	root:          func() string { return filepath.Join(filepath.Dir(config.AppInfo.AppsPath), "app-updates") },
+	runtime:       dockerUpdateRuntime{},
+	target:        storeUpdateTarget,
+	registryCheck: checkAppRegistryImages,
+}
+
+// Registry discovery is independent of store eligibility and never prepares an
+// installation target. Legacy clients retain the store check and update contract.
+func (m *UpdateManager) CheckRegistry(ctx context.Context, apps map[string]*ComposeApp) error {
+	if !m.checkMu.TryLock() {
+		return ErrAppOperationBusy
+	}
+	defer m.checkMu.Unlock()
+	for _, app := range apps {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		unlock, err := LockAppOperation(app.Name)
+		if err != nil {
+			continue
+		}
+		err = func() error {
+			defer unlock()
+			images := m.registryCheck(ctx, app)
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			r, err := m.read(app.Name)
+			if err != nil {
+				return err
+			}
+			now := time.Now().UTC()
+			r.Status.RegistryImages = images
+			r.Status.RegistryCheckedAt = &now
+			return m.save(app.Name, r)
+		}()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (m *UpdateManager) recordPath(id string) string {
@@ -383,6 +424,7 @@ func (m *UpdateManager) run(ctx context.Context, app, target *ComposeApp, r *upd
 		r.Pending = nil
 		r.Status.Operation = "reverted"
 		r.Status.CheckStatus = "unchecked"
+		r.Status.RegistryImages, r.Status.RegistryCheckedAt = nil, nil
 		if err := m.stage(app.Name, r, "reverted"); err != nil {
 			return err
 		}
@@ -430,6 +472,7 @@ func (m *UpdateManager) run(ctx context.Context, app, target *ComposeApp, r *upd
 	r.Pending = nil
 	r.Status.CurrentVersion, _ = target.MainTag()
 	r.Status.CheckStatus = "unchecked"
+	r.Status.RegistryImages, r.Status.RegistryCheckedAt = nil, nil
 	if err := m.stage(app.Name, r, "updated"); err != nil {
 		return err
 	}
@@ -471,6 +514,7 @@ func (m *UpdateManager) SettingsChanged(app *ComposeApp) error {
 	}
 	r.Status.CurrentVersion, _ = app.MainTag()
 	r.Status.CheckStatus = "unchecked"
+	r.Status.RegistryImages, r.Status.RegistryCheckedAt = nil, nil
 	return m.save(app.Name, r)
 }
 
