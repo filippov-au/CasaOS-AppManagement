@@ -120,3 +120,63 @@ func TestReleaseIdentifiesUnlabelledInstalledImageBeforeOfferingChanges(t *testi
 		t.Fatalf("unknown version treated as older: %+v", result)
 	}
 }
+
+func TestPlexReleaseUpdateRecognizesInstalledBuildBehindMovedAlias(t *testing.T) {
+	f := newRegistryFixture(t)
+	oldVersion := "1.43.2.10687-563d026ea-ls310"
+	labels := map[string]string{"build_version": "Linuxserver.io version:- " + oldVersion + " Build-date:- 2026-01-01"}
+	oldID := f.addLabeledImage(oldVersion, "amd64", "installed", labels)
+	f.addImage("1.43.2", "amd64", "moved-alias")
+	f.addImage("1.43.3", "amd64", "new-alias")
+	f.addImage("1.43.2.10687-563d026ea-ls313", "amd64", "packaging-update")
+	newVersion := "1.43.3.10896-cb3ebc72d-ls323"
+	newID := f.addImage(newVersion, "amd64", "new-release")
+	f.addImage("1.43.4.11000-abcdef123-ls324", "arm64", "other-platform")
+	image := strings.TrimPrefix(f.server.URL, "https://") + "/team/demo:"
+	installed := dockerTypes.ImageInspect{ID: oldID, Os: "linux", Architecture: "amd64", Config: &container.Config{Labels: labels}}
+	for _, tag := range []string{"1.43.2", "latest", oldVersion} {
+		result := ResolveImageUpdate(context.Background(), image+tag, installed)
+		if result.Status != "available" || result.Error != "" || result.CurrentVersion != oldVersion || result.LatestVersion != newVersion || result.LatestImage != image+newVersion || result.LatestImageID != newID {
+			t.Fatalf("%s: %+v", tag, result)
+		}
+	}
+	installed.ID = newID
+	installed.Config.Labels["build_version"] = "Linuxserver.io version:- " + newVersion
+	result := ResolveImageUpdate(context.Background(), image+newVersion, installed)
+	if result.Status != "up_to_date" || result.Error != "" {
+		t.Fatalf("repeated update: %+v", result)
+	}
+}
+
+func TestPlexReleaseCandidatesPreserveDowngradeAndChannelChecks(t *testing.T) {
+	installed := "1.43.2.10687-563d026ea-ls310"
+	tags := []string{
+		installed, "1.43.2.10687-563d026ea-ls309", "1.43.2.10686-abcdef123-ls999",
+		"1.43.2.10687-abcdef123-ls999", // Changed hash cannot establish ordering.
+		"1.43.2.10687-563d026ea-ls313", "1.43.3.10896-cb3ebc72d-ls323",
+		"1.43.3", "2026.9.9", "1.43.4.11000-ls324", "1.43.4.11000-abcdef123-ls324-beta",
+	}
+	for _, tc := range []struct {
+		channel string
+		want    []string
+	}{
+		{"1.43.2", []string{tags[5], tags[4], installed}},
+		{"1.43", []string{tags[5], tags[4], installed}},
+		{"1.43.3", []string{tags[5]}},
+		{"1.42", nil},
+		{"latest-rootless", nil},
+	} {
+		var got []string
+		for _, release := range releaseCandidates(tc.channel, installed, tags) {
+			got = append(got, release.tag)
+		}
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Fatalf("%s: got %v, want %v", tc.channel, got, tc.want)
+		}
+	}
+	for _, tag := range []string{"1.43.2-563d026ea", "1.43.2.10687-563d026ea", "1.43.2.10687-dev-ls310", "1.43.2.10687-563d026ea-ls310-beta"} {
+		if _, ok := parseImageRelease(tag); ok {
+			t.Fatalf("accepted unsupported release %s", tag)
+		}
+	}
+}

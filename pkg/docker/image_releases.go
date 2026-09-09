@@ -15,8 +15,10 @@ import (
 )
 
 // Accept release numbers and explicit packaging variants, never arbitrary
-// suffixes such as rc, beta, dev, nightly or commit hashes.
+// suffixes such as rc, beta, dev or nightly. Plex's LinuxServer releases have
+// a four-part version, an upstream commit hash and a numbered packaging build.
 var releaseTagPattern = regexp.MustCompile(`^(v?)([0-9]+(?:\.[0-9]+){1,3})(?:-ls([0-9]+))?(-(?:rootless|alpine|slim|bookworm|bullseye))?$`)
+var plexReleaseTagPattern = regexp.MustCompile(`^([0-9]+(?:\.[0-9]+){3})-([0-9a-f]{9})-ls([0-9]+)$`)
 var releaseChannelPattern = regexp.MustCompile(`^(latest|stable|v?[0-9]+(?:\.[0-9]+)?)(-(?:rootless|alpine|slim|bookworm|bullseye))?$`)
 
 type imageRelease struct {
@@ -24,11 +26,16 @@ type imageRelease struct {
 	numbers      [5]uint64
 	precision    int
 	lsBuild      bool
+	commit       string
 }
 
 func parseImageRelease(tag string) (imageRelease, bool) {
 	match := releaseTagPattern.FindStringSubmatch(tag)
 	release := imageRelease{tag: tag}
+	if plex := plexReleaseTagPattern.FindStringSubmatch(tag); plex != nil {
+		release.commit = plex[2]
+		match = []string{tag, "", plex[1], plex[3], ""}
+	}
 	if match == nil {
 		return release, false
 	}
@@ -66,7 +73,16 @@ func compareImageReleases(a, b imageRelease) int {
 
 func sameReleaseScheme(a, b imageRelease) bool {
 	calendar := func(r imageRelease) bool { return r.numbers[0] >= 1900 && r.numbers[0] <= 2999 }
-	return a.lsBuild == b.lsBuild && calendar(a) == calendar(b)
+	return a.lsBuild == b.lsBuild && (a.commit == "") == (b.commit == "") && calendar(a) == calendar(b)
+}
+
+func sameUpstreamVersion(a, b imageRelease) bool {
+	for i := 0; i < 4; i++ {
+		if a.numbers[i] != b.numbers[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func releaseCandidates(channel, installed string, tags []string) []imageRelease {
@@ -82,16 +98,27 @@ func releaseCandidates(channel, installed string, tags []string) []imageRelease 
 		return nil
 	}
 	baseline, known := parseImageRelease(installed)
-	if numbered && known && !sameReleaseScheme(configured, baseline) {
+	// Plex's short configured tag is an alias for its full LinuxServer build.
+	// Keep the installed build as the comparison baseline and select full tags.
+	plexAlias := numbered && known && baseline.commit != "" && !configured.lsBuild && configured.precision <= 3
+	if numbered && known && !plexAlias && !sameReleaseScheme(configured, baseline) {
 		return nil
 	}
-	if numbered && (!known || compareImageReleases(configured, baseline) > 0) {
+	if numbered && !plexAlias && (!known || compareImageReleases(configured, baseline) > 0) {
 		baseline, known = configured, true
 	}
 	var candidates []imageRelease
 	for _, tag := range tags {
 		release, ok := parseImageRelease(tag)
 		if !ok || release.variant != variant || (known && (!sameReleaseScheme(release, baseline) || compareImageReleases(release, baseline) < 0)) {
+			continue
+		}
+		if plexAlias && compareImageReleases(release, configured) < 0 {
+			continue
+		}
+		// Hashes have no ordering. A changed hash at the same upstream version
+		// cannot establish an upgrade even if its packaging build is higher.
+		if known && baseline.commit != "" && release.commit != baseline.commit && sameUpstreamVersion(release, baseline) {
 			continue
 		}
 		matches := true
