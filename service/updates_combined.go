@@ -14,6 +14,18 @@ import (
 
 var ErrUpdatePlanStale = errors.New("app settings or the available update changed; check for updates again")
 
+// UsesCheckedUpdates distinguishes saved registry checks from legacy store
+// updates, including failed or expired plans which must be checked again.
+func (m *UpdateManager) UsesCheckedUpdates(id string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r, err := m.read(id)
+	if err != nil {
+		return false, err
+	}
+	return r.Combined, nil
+}
+
 // Plans stay in the private recovery record, never in API responses. The button
 // installs the checked definition and verifies downloaded images before applying.
 type appUpdatePlan struct {

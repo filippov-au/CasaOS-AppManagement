@@ -422,9 +422,20 @@ func (a *AppManagement) UpdateComposeApp(ctx echo.Context, id codegen.ComposeApp
 		return ctx.JSON(http.StatusNotFound, codegen.ResponseNotFound{Message: &message})
 	}
 
+	return updateComposeApp(ctx, composeApp, params)
+}
+
+func updateComposeApp(ctx echo.Context, composeApp *service.ComposeApp, params codegen.UpdateComposeAppParams) error {
+	id := composeApp.Name
 	if params.Force != nil && !*params.Force && params.UpdateToken == nil {
-		// check if updateAvailable
-		if !service.MyService.AppStoreManagement().IsUpdateAvailable(composeApp) {
+		// Legacy dashboard buttons have no token. If this app has a registry
+		// check, let the update manager validate that plan instead of consulting
+		// the unrelated marketplace availability cache.
+		checked, err := service.Updates.UsesCheckedUpdates(id)
+		if err != nil {
+			return updateError(ctx, err)
+		}
+		if !checked && !service.MyService.AppStoreManagement().IsUpdateAvailable(composeApp) {
 			message := fmt.Sprintf("compose app `%s` is up to date", id)
 			return ctx.JSON(http.StatusOK, codegen.ComposeAppUpdateOK{Message: &message})
 		}
