@@ -78,3 +78,45 @@ func TestReleaseUpdateNeverFallsBackToUnversionedBuildOrDowngrade(t *testing.T) 
 		t.Fatalf("tag-list failure hidden: %+v", result)
 	}
 }
+
+func TestNZBGetReleaseNeverComparesDateAliasesToLinuxServerVersions(t *testing.T) {
+	f := newRegistryFixture(t)
+	labels := map[string]string{"build_version": "Linuxserver.io version:- v26.2-ls250 Build-date:- 2026-01-01"}
+	oldID := f.addLabeledImage("v26.2-ls250", "amd64", "installed", labels)
+	wantID := f.addImage("v26.3-ls262", "amd64", "release")
+	f.addImage("2021.11.25", "amd64", "old-date-release")
+	f.addImage("26.3.20260904", "amd64", "date-build-alias")
+	f.addImage("testing-version-cd7e586", "amd64", "testing")
+	image := strings.TrimPrefix(f.server.URL, "https://") + "/team/demo:latest"
+	result := ResolveImageUpdate(context.Background(), image, dockerTypes.ImageInspect{ID: oldID, Os: "linux", Architecture: "amd64", Config: &container.Config{Labels: labels}})
+	if result.LatestVersion != "v26.3-ls262" || result.LatestImageID != wantID || result.Status != "available" {
+		t.Fatalf("wrong release family: %+v", result)
+	}
+	if got := releaseCandidates("latest", "26.2", []string{"2021.11.25", "26.3"}); len(got) != 1 || got[0].tag != "26.3" {
+		t.Fatal(got)
+	}
+	if got := releaseCandidates("latest", "2025.11.25", []string{"2026.1.1", "26.3"}); len(got) != 1 || got[0].tag != "2026.1.1" {
+		t.Fatal(got)
+	}
+}
+
+func TestReleaseIdentifiesUnlabelledInstalledImageBeforeOfferingChanges(t *testing.T) {
+	f := newRegistryFixture(t)
+	id := f.addImage("2.15.1", "amd64", "installed")
+	image := strings.TrimPrefix(f.server.URL, "https://") + "/team/demo:latest"
+	installed := dockerTypes.ImageInspect{ID: id, Os: "linux", Architecture: "amd64"}
+	result := ResolveImageUpdate(context.Background(), image, installed)
+	if result.CurrentVersion != "2.15.1" || result.LatestVersion != "2.15.1" || result.CurrentImageID != result.LatestImageID {
+		t.Fatalf("same image not recognised: %+v", result)
+	}
+	nextID := f.addImage("2.16.0", "amd64", "newer")
+	result = ResolveImageUpdate(context.Background(), image, installed)
+	if result.CurrentVersion != "2.15.1" || result.LatestVersion != "2.16.0" || result.LatestImageID != nextID {
+		t.Fatalf("upgrade direction not resolved: %+v", result)
+	}
+	installed.ID = "sha256:" + strings.Repeat("f", 64)
+	result = ResolveImageUpdate(context.Background(), image, installed)
+	if result.Status != "failed" || result.LatestImage != "" || !strings.Contains(result.Error, "downgrade") {
+		t.Fatalf("unknown version treated as older: %+v", result)
+	}
+}

@@ -221,3 +221,40 @@ func TestOldUnversionedPlanRequiresAnotherCheck(t *testing.T) {
 		t.Fatal("old build offer accepted", err)
 	}
 }
+
+func TestPinRequiresIdenticalImagesForEveryService(t *testing.T) {
+	m, _, app := combinedFixture(t)
+	m.resolve = func(_ context.Context, installed, target *ComposeApp) ([]docker.ImageUpdate, error) {
+		target.Services[0].Image = "ghcr.io/advplyr/audiobookshelf:2.23.0"
+		return []docker.ImageUpdate{{Service: "web", Status: "available", CurrentVersion: "2.23.0", LatestVersion: "2.23.0", CurrentImageID: "sha256:same", LatestImageID: "sha256:same"}}, nil
+	}
+	if err := m.CheckCombined(context.Background(), map[string]*ComposeApp{app.Name: app}); err != nil {
+		t.Fatal(err)
+	}
+	status, err := m.Status(context.Background(), app)
+	if err != nil || !status.UpdateReady || status.UpdateKind != "pin" {
+		t.Fatalf("%+v %v", status, err)
+	}
+	for _, images := range [][]docker.ImageUpdate{
+		{{CurrentImageID: "sha256:a", LatestImageID: "sha256:b", CurrentVersion: "1.0", LatestVersion: "1.0"}},
+		{{CurrentImageID: "sha256:a", LatestImageID: "sha256:a"}, {CurrentImageID: "sha256:b", LatestImageID: "sha256:c"}},
+		{{LatestImageID: "sha256:a"}},
+		nil,
+	} {
+		if checkedUpdateKind(images) != "update" {
+			t.Fatal("real or unknown image change reported as a pin", images)
+		}
+	}
+	record, _ := m.read(app.Name)
+	record.Plan.ReleasePolicy = 0
+	if err := m.save(app.Name, record); err != nil {
+		t.Fatal(err)
+	}
+	status, _ = m.Status(context.Background(), app)
+	if status.UpdateReady {
+		t.Fatal("old sorting policy remains installable")
+	}
+	if err := m.StartChecked(context.Background(), app, record.Plan.Token); !errors.Is(err, ErrUpdatePlanStale) {
+		t.Fatal(err)
+	}
+}

@@ -29,6 +29,7 @@ func LockAppOperation(id string) (func(), error) {
 func appOperationBusy(id string) bool { _, ok := appOperations.Load(id); return ok }
 
 type AppUpdateStatus struct {
+	UpdateKind        string               `json:"update_kind,omitempty"`
 	UpdateReady       bool                 `json:"update_ready"`
 	UpdateToken       string               `json:"update_token,omitempty"`
 	RegistryImages    []docker.ImageUpdate `json:"registry_images,omitempty"`
@@ -209,7 +210,11 @@ func (m *UpdateManager) Status(ctx context.Context, app *ComposeApp) (AppUpdateS
 		return AppUpdateStatus{}, err
 	}
 	s := r.Status
-	s.UpdateReady = r.Plan != nil && r.Plan.NumberedReleases && s.CheckStatus == "available" && r.Pending == nil
+	s.UpdateKind = ""
+	if r.Plan != nil {
+		s.UpdateKind = r.Plan.Kind
+	}
+	s.UpdateReady = r.Plan != nil && r.Plan.NumberedReleases && r.Plan.ReleasePolicy == 2 && s.CheckStatus == "available" && r.Pending == nil
 	if s.UpdateReady {
 		s.UpdateToken = r.Plan.Token
 	}

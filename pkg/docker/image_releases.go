@@ -23,6 +23,7 @@ type imageRelease struct {
 	tag, variant string
 	numbers      [5]uint64
 	precision    int
+	lsBuild      bool
 }
 
 func parseImageRelease(tag string) (imageRelease, bool) {
@@ -41,6 +42,7 @@ func parseImageRelease(tag string) (imageRelease, bool) {
 		release.numbers[i] = number
 	}
 	if match[3] != "" {
+		release.lsBuild = true
 		number, err := strconv.ParseUint(match[3], 10, 64)
 		if err != nil {
 			return release, false
@@ -62,6 +64,11 @@ func compareImageReleases(a, b imageRelease) int {
 	return 0
 }
 
+func sameReleaseScheme(a, b imageRelease) bool {
+	calendar := func(r imageRelease) bool { return r.numbers[0] >= 1900 && r.numbers[0] <= 2999 }
+	return a.lsBuild == b.lsBuild && calendar(a) == calendar(b)
+}
+
 func releaseCandidates(channel, installed string, tags []string) []imageRelease {
 	configured, numbered := parseImageRelease(channel)
 	variant := configured.variant
@@ -75,13 +82,16 @@ func releaseCandidates(channel, installed string, tags []string) []imageRelease 
 		return nil
 	}
 	baseline, known := parseImageRelease(installed)
+	if numbered && known && !sameReleaseScheme(configured, baseline) {
+		return nil
+	}
 	if numbered && (!known || compareImageReleases(configured, baseline) > 0) {
 		baseline, known = configured, true
 	}
 	var candidates []imageRelease
 	for _, tag := range tags {
 		release, ok := parseImageRelease(tag)
-		if !ok || release.variant != variant || (known && compareImageReleases(release, baseline) < 0) {
+		if !ok || release.variant != variant || (known && (!sameReleaseScheme(release, baseline) || compareImageReleases(release, baseline) < 0)) {
 			continue
 		}
 		matches := true
@@ -119,11 +129,43 @@ func checkRepositoryRelease(ctx context.Context, repo distribution.Repository, n
 	candidates := releaseCandidates(tag, result.CurrentVersion, tags)
 	result.Error = "No compatible numbered stable release was found. Unversioned and development builds are not offered."
 	platform := v1.Platform{OS: installed.Os, Architecture: installed.Architecture, Variant: installed.Variant}
+	// When labels cannot identify the installed release, first match its actual
+	// config digest to a published release. Never guess update direction from a tag.
+	cache := map[string]registryImageInfo{}
+	if _, known := parseImageRelease(result.CurrentVersion); !known {
+		matched := false
+		for i, candidate := range candidates {
+			if i == 20 {
+				break
+			}
+			info, err := platformImageInfo(ctx, repo, candidate.tag, "", platform, 0)
+			if errors.Is(err, errImagePlatform) {
+				continue
+			}
+			if err != nil {
+				return result
+			}
+			cache[candidate.tag] = info
+			if info.ID == installed.ID {
+				result.CurrentVersion, matched = candidate.tag, true
+				break
+			}
+		}
+		if !matched {
+			result.Error = "Could not identify the installed release. Updating is disabled because a downgrade cannot be ruled out."
+			return result
+		}
+		candidates = releaseCandidates(tag, result.CurrentVersion, tags)
+	}
 	for i, candidate := range candidates {
 		if i == 20 {
 			break
 		}
-		info, err := platformImageInfo(ctx, repo, candidate.tag, "", platform, 0)
+		info, cached := cache[candidate.tag]
+		var err error
+		if !cached {
+			info, err = platformImageInfo(ctx, repo, candidate.tag, "", platform, 0)
+		}
 		if errors.Is(err, errImagePlatform) {
 			continue
 		}
@@ -135,6 +177,9 @@ func checkRepositoryRelease(ctx context.Context, repo distribution.Repository, n
 		result.LatestImage = reference.FamiliarString(ref)
 		// The verified release tag supplies the version even when labels are absent.
 		result.LatestVersion, result.LatestImageID = candidate.tag, info.ID
+		if info.ID == installed.ID {
+			result.CurrentVersion = candidate.tag
+		}
 		result.Status, result.Error = "up_to_date", ""
 		if info.ID != installed.ID || candidate.tag != tag {
 			result.Status = "available"

@@ -1332,6 +1332,10 @@ components:
       type: object
       required: [id, title, icon, current_version, check_status, operation, rollback_available]
       properties:
+        update_kind:
+          type: string
+          enum: [update, pin]
+          description: Pin means every service keeps its installed immutable image and only the references change
         update_ready:
           type: boolean
           description: A checked installation plan exists and no failed update requires recovery first
