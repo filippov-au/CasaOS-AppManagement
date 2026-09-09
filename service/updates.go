@@ -506,6 +506,12 @@ func (m *UpdateManager) run(ctx context.Context, app, target *ComposeApp, r *upd
 		r.Status.CurrentVersion = r.Status.TargetVersion
 	}
 	r.Status.CheckStatus = "unchecked"
+	if r.Plan != nil {
+		// The checked image IDs were verified and applied successfully. Keep this
+		// result until the next explicit check; completing an update needs no scan.
+		r.Status.CheckStatus = "up_to_date"
+	}
+	r.Status.TargetVersion, r.Status.CheckError = "", ""
 	r.Status.RegistryImages, r.Status.RegistryCheckedAt = nil, nil
 	r.Plan = nil
 	if err := m.stage(app.Name, r, "updated"); err != nil {

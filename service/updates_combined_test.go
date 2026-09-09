@@ -118,6 +118,49 @@ func TestCombinedUpdateRejectsStaleSettingsAndConfirmation(t *testing.T) {
 	}
 }
 
+func TestCompletedUpdatesAndPinsNeedNoRegistryRecheck(t *testing.T) {
+	for _, kind := range []string{"update", "pin"} {
+		t.Run(kind, func(t *testing.T) {
+			m, _, app := combinedFixture(t)
+			wantVersion := "2.36.0"
+			if kind == "pin" {
+				wantVersion = "2.23.0"
+				m.resolve = func(_ context.Context, installed, target *ComposeApp) ([]docker.ImageUpdate, error) {
+					return []docker.ImageUpdate{{Service: "web", Status: "available", CurrentVersion: wantVersion, LatestVersion: wantVersion, CurrentImageID: "sha256:same", LatestImageID: "sha256:same"}}, nil
+				}
+			}
+			if err := m.CheckCombined(context.Background(), map[string]*ComposeApp{app.Name: app}); err != nil {
+				t.Fatal(err)
+			}
+			record, _ := m.read(app.Name)
+			if record.Plan == nil || record.Plan.Kind != kind {
+				t.Fatalf("expected %s plan", kind)
+			}
+			target, err := loadCheckedTarget(app, record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m.resolve = func(context.Context, *ComposeApp, *ComposeApp) ([]docker.ImageUpdate, error) {
+				t.Fatal("completion must not check the registry again")
+				return nil, nil
+			}
+			if err := m.run(context.Background(), app, target, record, false); err != nil {
+				t.Fatal(err)
+			}
+			status, err := m.Status(context.Background(), target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if status.Operation != "updated" || status.CheckStatus != "up_to_date" || status.CurrentVersion != wantVersion || status.UpdateReady || status.UpdateToken != "" || status.TargetVersion != "" || status.CheckError != "" {
+				t.Fatalf("completed offer still pending: %+v", status)
+			}
+			if !status.RollbackAvailable || status.RollbackVersion != "2.23.0" {
+				t.Fatalf("completion lost recovery: %+v", status)
+			}
+		})
+	}
+}
+
 func TestCombinedUpdateFailureClearsStaleOffer(t *testing.T) {
 	m, _, app := combinedFixture(t)
 	if err := m.CheckCombined(context.Background(), map[string]*ComposeApp{app.Name: app}); err != nil {
