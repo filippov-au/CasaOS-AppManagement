@@ -209,7 +209,7 @@ func (m *UpdateManager) Status(ctx context.Context, app *ComposeApp) (AppUpdateS
 		return AppUpdateStatus{}, err
 	}
 	s := r.Status
-	s.UpdateReady = r.Plan != nil && s.CheckStatus == "available" && r.Pending == nil
+	s.UpdateReady = r.Plan != nil && r.Plan.NumberedReleases && s.CheckStatus == "available" && r.Pending == nil
 	if s.UpdateReady {
 		s.UpdateToken = r.Plan.Token
 	}

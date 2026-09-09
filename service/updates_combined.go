@@ -17,11 +17,12 @@ var ErrUpdatePlanStale = errors.New("app settings or the available update change
 // Plans stay in the private recovery record, never in API responses. The button
 // installs the checked definition and verifies downloaded images before applying.
 type appUpdatePlan struct {
-	Token      string            `json:"token"`
-	YAML       []byte            `json:"yaml"`
-	ConfigHash string            `json:"config_hash"`
-	ImageIDs   map[string]string `json:"image_ids"`
-	CreatedAt  time.Time         `json:"created_at"`
+	NumberedReleases bool              `json:"numbered_releases"`
+	Token            string            `json:"token"`
+	YAML             []byte            `json:"yaml"`
+	ConfigHash       string            `json:"config_hash"`
+	ImageIDs         map[string]string `json:"image_ids"`
+	CreatedAt        time.Time         `json:"created_at"`
 }
 
 func appConfigHash(app *ComposeApp) (string, error) {
@@ -31,7 +32,7 @@ func appConfigHash(app *ComposeApp) (string, error) {
 
 func loadCheckedTarget(app *ComposeApp, record *updateRecord) (*ComposeApp, error) {
 	plan := record.Plan
-	if plan == nil || record.Status.CheckStatus != "available" || time.Since(plan.CreatedAt) > 24*time.Hour {
+	if plan == nil || !plan.NumberedReleases || record.Status.CheckStatus != "available" || time.Since(plan.CreatedAt) > 24*time.Hour {
 		return nil, ErrUpdatePlanStale
 	}
 	hash, err := appConfigHash(app)
@@ -153,7 +154,7 @@ func prepareCheckedUpdate(app, target *ComposeApp, images []docker.ImageUpdate, 
 	if _, err := rand.Read(token[:]); err != nil {
 		return err
 	}
-	r.Plan = &appUpdatePlan{Token: hex.EncodeToString(token[:]), YAML: data, ConfigHash: hash, ImageIDs: ids, CreatedAt: now}
+	r.Plan = &appUpdatePlan{NumberedReleases: true, Token: hex.EncodeToString(token[:]), YAML: data, ConfigHash: hash, ImageIDs: ids, CreatedAt: now}
 	r.Status.CheckStatus = "available"
 	return nil
 }

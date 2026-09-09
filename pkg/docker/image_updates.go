@@ -227,7 +227,8 @@ func CheckImageUpdate(ctx context.Context, image string, installed dockerTypes.I
 	return checkImageUpdate(ctx, image, installed, false)
 }
 
-// ResolveImageUpdate also resolves pinned digests for verified installation.
+// ResolveImageUpdate selects numbered stable releases for verified installation.
+// Explicit digest pins remain pinned.
 func ResolveImageUpdate(ctx context.Context, image string, installed dockerTypes.ImageInspect) ImageUpdate {
 	return checkImageUpdate(ctx, image, installed, true)
 }
@@ -267,6 +268,9 @@ func checkImageUpdate(ctx context.Context, image string, installed dockerTypes.I
 	}
 	named = reference.TagNameOnly(named)
 	tag := named.(reference.Tagged).Tag()
+	if resolvePinned {
+		return checkRepositoryRelease(ctx, repo, named, tag, installed, result)
+	}
 	return checkRepositoryImage(ctx, repo, named, tag, installed, result)
 }
 

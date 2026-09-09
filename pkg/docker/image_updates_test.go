@@ -232,12 +232,12 @@ func TestRegistryCheckResolvesVersionsBehindLatest(t *testing.T) {
 	image := strings.TrimPrefix(f.server.URL, "https://") + "/team/demo:latest"
 	// The running container still references oldID even when latest has moved.
 	installed := dockerTypes.ImageInspect{ID: oldID, Os: "linux", Architecture: "amd64", Config: &container.Config{Labels: oldLabels}}
-	result := ResolveImageUpdate(context.Background(), image, installed)
+	result := CheckImageUpdate(context.Background(), image, installed)
 	if result.Status != "available" || result.CurrentImageID != oldID || result.LatestImageID != newID || result.CurrentVersion != "5.0.3.8127-ls190" || result.LatestVersion != "5.1.0.9000-ls200" || result.LatestImage != image {
 		t.Fatalf("failed to resolve versions behind latest: %+v", result)
 	}
 	installed.ID, installed.Config.Labels = newID, newLabels
-	result = ResolveImageUpdate(context.Background(), image, installed)
+	result = CheckImageUpdate(context.Background(), image, installed)
 	if result.Status != "up_to_date" || result.CurrentVersion != result.LatestVersion {
 		t.Fatalf("repeated update: %+v", result)
 	}

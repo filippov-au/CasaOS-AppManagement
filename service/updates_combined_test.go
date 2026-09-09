@@ -202,3 +202,22 @@ func TestCheckedVersionsUseMainServiceImageMetadata(t *testing.T) {
 		t.Fatalf("%+v", status)
 	}
 }
+
+func TestOldUnversionedPlanRequiresAnotherCheck(t *testing.T) {
+	m, _, app := combinedFixture(t)
+	if err := m.CheckCombined(context.Background(), map[string]*ComposeApp{app.Name: app}); err != nil {
+		t.Fatal(err)
+	}
+	record, _ := m.read(app.Name)
+	record.Plan.NumberedReleases = false
+	if err := m.save(app.Name, record); err != nil {
+		t.Fatal(err)
+	}
+	status, err := m.Status(context.Background(), app)
+	if err != nil || status.UpdateReady || status.UpdateToken != "" {
+		t.Fatalf("old build offer is installable: %+v %v", status, err)
+	}
+	if err := m.StartChecked(context.Background(), app, record.Plan.Token); !errors.Is(err, ErrUpdatePlanStale) {
+		t.Fatal("old build offer accepted", err)
+	}
+}
