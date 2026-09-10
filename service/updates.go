@@ -14,6 +14,7 @@ import (
 	"github.com/IceWhaleTech/CasaOS-AppManagement/common"
 	"github.com/IceWhaleTech/CasaOS-AppManagement/pkg/config"
 	"github.com/IceWhaleTech/CasaOS-AppManagement/pkg/docker"
+	"golang.org/x/sync/errgroup"
 )
 
 var ErrAppOperationBusy = errors.New("another operation is already running for this app")
@@ -77,6 +78,41 @@ type updateRuntime interface {
 	Verify(context.Context, *ComposeApp, map[string]string) error
 }
 
+// A check spends almost all of its time waiting for registry round trips, so
+// apps and their services are checked concurrently. The limits keep a large
+// install from opening an unbounded number of connections to a registry.
+const (
+	updateCheckAppParallelism     = 8
+	updateCheckServiceParallelism = 4
+)
+
+// forEachApp runs check for every app that is not already busy, with bounded
+// concurrency. A failure stops new work and cancels its siblings; a cancelled
+// check drops its result instead of saving it. Running checks are drained before
+// the first error is returned.
+func (m *UpdateManager) forEachApp(ctx context.Context, apps map[string]*ComposeApp, check func(context.Context, *ComposeApp) error) error {
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.SetLimit(updateCheckAppParallelism)
+	for _, app := range apps {
+		if groupCtx.Err() != nil {
+			break
+		}
+		unlock, err := LockAppOperation(app.Name)
+		if err != nil {
+			continue
+		}
+		app := app
+		group.Go(func() error {
+			defer unlock()
+			return check(groupCtx, app)
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return err
+	}
+	return ctx.Err()
+}
+
 type UpdateManager struct {
 	mu            sync.Mutex
 	checkMu       sync.Mutex
@@ -102,33 +138,29 @@ func (m *UpdateManager) CheckRegistry(ctx context.Context, apps map[string]*Comp
 		return ErrAppOperationBusy
 	}
 	defer m.checkMu.Unlock()
-	for _, app := range apps {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		unlock, err := LockAppOperation(app.Name)
-		if err != nil {
-			continue
-		}
-		err = func() error {
-			defer unlock()
-			images := m.registryCheck(ctx, app)
-			m.mu.Lock()
-			defer m.mu.Unlock()
-			r, err := m.read(app.Name)
-			if err != nil {
-				return err
-			}
-			now := time.Now().UTC()
-			r.Status.RegistryImages = images
-			r.Status.RegistryCheckedAt = &now
-			return m.save(app.Name, r)
-		}()
-		if err != nil {
-			return err
-		}
+	return m.forEachApp(ctx, apps, m.checkRegistryApp)
+}
+
+func (m *UpdateManager) checkRegistryApp(ctx context.Context, app *ComposeApp) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	return nil
+	images := m.registryCheck(ctx, app)
+	if err := ctx.Err(); err != nil {
+		// The client went away or another app failed. Cancelled checks report
+		// every image as failed, so keep the previous result instead.
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r, err := m.read(app.Name)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	r.Status.RegistryImages = images
+	r.Status.RegistryCheckedAt = &now
+	return m.save(app.Name, r)
 }
 
 func (m *UpdateManager) recordPath(id string) string {
@@ -268,59 +300,60 @@ func (m *UpdateManager) Check(ctx context.Context, apps map[string]*ComposeApp) 
 	}
 	defer m.checkMu.Unlock()
 	sourceErrors := refreshUpdateCatalogs()
-	for _, app := range apps {
-		unlock, err := LockAppOperation(app.Name)
-		if err != nil {
-			continue
+	return m.forEachApp(ctx, apps, func(ctx context.Context, app *ComposeApp) error {
+		return m.checkStoreApp(ctx, app, sourceErrors)
+	})
+}
+
+func (m *UpdateManager) checkStoreApp(ctx context.Context, app *ComposeApp, sourceErrors map[string]error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	r, err := m.read(app.Name)
+	m.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	target, checkErr := m.target(app)
+	r.Plan, r.Combined = nil, false
+	s := &r.Status
+	now := time.Now().UTC()
+	s.CheckedAt = &now
+	s.TargetVersion = ""
+	s.CheckError = ""
+	s.CheckStatus = "up_to_date"
+	if errors.Is(checkErr, ErrStoreInfoNotFound) || errors.Is(checkErr, ErrNotFoundInAppStore) {
+		s.CheckStatus = "unmanaged"
+	} else {
+		if checkErr == nil {
+			if ext, ok := target.Extensions[common.ComposeExtensionNameXCasaOS].(map[string]interface{}); ok {
+				if source, ok := ext["store_url"].(string); ok && sourceErrors[source] != nil {
+					checkErr = errors.New("this app's store could not be refreshed; retry the check")
+				}
+			}
 		}
-		err = func() error {
-			defer unlock()
-			m.mu.Lock()
-			r, err := m.read(app.Name)
-			m.mu.Unlock()
-			if err != nil {
-				return err
+		if checkErr == nil {
+			s.TargetVersion, _ = target.MainTag()
+			var available bool
+			available, checkErr = m.runtime.Check(ctx, app, target)
+			if available {
+				s.CheckStatus = "available"
 			}
-			target, checkErr := m.target(app)
-			r.Plan, r.Combined = nil, false
-			s := &r.Status
-			now := time.Now().UTC()
-			s.CheckedAt = &now
-			s.TargetVersion = ""
-			s.CheckError = ""
-			s.CheckStatus = "up_to_date"
-			if errors.Is(checkErr, ErrStoreInfoNotFound) || errors.Is(checkErr, ErrNotFoundInAppStore) {
-				s.CheckStatus = "unmanaged"
-			} else {
-				if checkErr == nil {
-					if ext, ok := target.Extensions[common.ComposeExtensionNameXCasaOS].(map[string]interface{}); ok {
-						if source, ok := ext["store_url"].(string); ok && sourceErrors[source] != nil {
-							checkErr = errors.New("this app's store could not be refreshed; retry the check")
-						}
-					}
-				}
-				if checkErr == nil {
-					s.TargetVersion, _ = target.MainTag()
-					var available bool
-					available, checkErr = m.runtime.Check(ctx, app, target)
-					if available {
-						s.CheckStatus = "available"
-					}
-				}
-				if checkErr != nil {
-					s.CheckStatus = "failed"
-					s.CheckError = checkErr.Error()
-				}
-			}
-			m.mu.Lock()
-			defer m.mu.Unlock()
-			return m.save(app.Name, r)
-		}()
-		if err != nil {
-			return err
+		}
+		if checkErr != nil {
+			s.CheckStatus = "failed"
+			s.CheckError = checkErr.Error()
 		}
 	}
-	return nil
+	if err := ctx.Err(); err != nil {
+		// The client went away or another app failed. Do not publish a result
+		// that was produced from an aborted check.
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.save(app.Name, r)
 }
 
 // Start reserves the app synchronously so repeated requests cannot launch competing jobs.

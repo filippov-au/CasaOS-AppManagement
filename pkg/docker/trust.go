@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"sync"
 
 	cliconfig "github.com/docker/cli/cli/config"
 	"github.com/docker/cli/cli/config/configfile"
@@ -16,6 +17,22 @@ import (
 	"github.com/docker/cli/cli/config/types"
 	"github.com/docker/distribution/reference"
 )
+
+// The Docker CLI resolves its configuration directory and home directory through
+// package-level variables that it fills in lazily without synchronization.
+// Concurrent image operations must not race on them, so every load is serialized.
+var dockerConfigMu sync.Mutex
+
+func loadDockerConfig() (*configfile.ConfigFile, error) {
+	configDir := os.Getenv("DOCKER_CONFIG")
+	if configDir == "" {
+		// The same default as image pulls: the CLI's own config directory.
+		configDir = "/"
+	}
+	dockerConfigMu.Lock()
+	defer dockerConfigMu.Unlock()
+	return cliconfig.Load(configDir)
+}
 
 // EncodedAuth returns an encoded auth config for the given registry
 // loaded from environment variables or docker config
@@ -53,11 +70,7 @@ func EncodedConfigAuth(ref string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	configDir := os.Getenv("DOCKER_CONFIG")
-	if configDir == "" {
-		configDir = "/"
-	}
-	configFile, err := cliconfig.Load(configDir)
+	configFile, err := loadDockerConfig()
 	if err != nil {
 		return "", err
 	}

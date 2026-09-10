@@ -92,64 +92,60 @@ func (m *UpdateManager) CheckCombined(ctx context.Context, apps map[string]*Comp
 		return ErrAppOperationBusy
 	}
 	defer m.checkMu.Unlock()
-	for _, app := range apps {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		unlock, err := LockAppOperation(app.Name)
-		if err != nil {
-			continue
-		}
-		err = func() error {
-			defer unlock()
-			// Match Start's resolved configuration, including edits made outside CasaOS.
-			var checkErr error
-			if len(app.ComposeFiles) != 1 {
-				checkErr = errors.New("updates require one saved Compose configuration; review this app's settings")
-			} else if loaded, err := LoadComposeAppFromConfigFile(app.Name, app.ComposeFiles[0]); err != nil {
-				checkErr = errors.New("could not read this app's configuration; review its settings and retry")
-			} else {
-				app = loaded
-			}
-			m.mu.Lock()
-			r, err := m.read(app.Name)
-			m.mu.Unlock()
-			if err != nil {
-				return err
-			}
-			r.Plan, r.Combined = nil, true
-			now := time.Now().UTC()
-			s := &r.Status
-			s.CheckedAt, s.RegistryCheckedAt = &now, &now
-			s.RegistryImages = nil
-			s.TargetVersion, s.CheckError = "", ""
-			s.CheckStatus = "failed"
-			s.CurrentVersion = updateVersion(app)
-			var target *ComposeApp
-			if checkErr == nil {
-				target, checkErr = cloneCompose(app)
-			}
-			if checkErr == nil {
-				var images []docker.ImageUpdate
-				images, checkErr = m.resolve(ctx, app, target)
-				s.RegistryImages = images
-				setCheckedVersions(app, images, s)
-				if checkErr == nil {
-					checkErr = prepareCheckedUpdate(app, target, images, r, now)
-				}
-			}
-			if checkErr != nil {
-				s.CheckStatus, s.CheckError = "failed", checkErr.Error()
-			}
-			m.mu.Lock()
-			defer m.mu.Unlock()
-			return m.save(app.Name, r)
-		}()
-		if err != nil {
-			return err
+	return m.forEachApp(ctx, apps, m.checkCombinedApp)
+}
+
+func (m *UpdateManager) checkCombinedApp(ctx context.Context, app *ComposeApp) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Match Start's resolved configuration, including edits made outside CasaOS.
+	var checkErr error
+	if len(app.ComposeFiles) != 1 {
+		checkErr = errors.New("updates require one saved Compose configuration; review this app's settings")
+	} else if loaded, err := LoadComposeAppFromConfigFile(app.Name, app.ComposeFiles[0]); err != nil {
+		checkErr = errors.New("could not read this app's configuration; review its settings and retry")
+	} else {
+		app = loaded
+	}
+	m.mu.Lock()
+	r, err := m.read(app.Name)
+	m.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	r.Plan, r.Combined = nil, true
+	now := time.Now().UTC()
+	s := &r.Status
+	s.CheckedAt, s.RegistryCheckedAt = &now, &now
+	s.RegistryImages = nil
+	s.TargetVersion, s.CheckError = "", ""
+	s.CheckStatus = "failed"
+	s.CurrentVersion = updateVersion(app)
+	var target *ComposeApp
+	if checkErr == nil {
+		target, checkErr = cloneCompose(app)
+	}
+	if checkErr == nil {
+		var images []docker.ImageUpdate
+		images, checkErr = m.resolve(ctx, app, target)
+		s.RegistryImages = images
+		setCheckedVersions(app, images, s)
+		if checkErr == nil {
+			checkErr = prepareCheckedUpdate(app, target, images, r, now)
 		}
 	}
-	return nil
+	if checkErr != nil {
+		s.CheckStatus, s.CheckError = "failed", checkErr.Error()
+	}
+	if err := ctx.Err(); err != nil {
+		// The client went away or another app failed. Never publish a result
+		// gathered from an aborted check over the last saved one.
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.save(app.Name, r)
 }
 
 func prepareCheckedUpdate(app, target *ComposeApp, images []docker.ImageUpdate, r *updateRecord, now time.Time) error {

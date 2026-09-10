@@ -301,3 +301,94 @@ func TestPinRequiresIdenticalImagesForEveryService(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Each app keeps its own record, so a check must publish every app's result even
+// though the apps are checked together.
+func combinedAppsFixture(t *testing.T, names ...string) (*UpdateManager, map[string]*ComposeApp) {
+	t.Helper()
+	m, _, _ := updateFixture(t)
+	dir := t.TempDir()
+	apps := make(map[string]*ComposeApp, len(names))
+	for _, name := range names {
+		app := &ComposeApp{
+			Name:       name,
+			Services:   types.Services{{Name: "web", Image: "ghcr.io/advplyr/audiobookshelf:2.23.0"}},
+			Extensions: types.Extensions{common.ComposeExtensionNameXCasaOS: map[string]interface{}{"main": "web"}},
+		}
+		path := filepath.Join(dir, name+".yaml")
+		data, err := resolvedComposeYAML(app)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := LoadComposeAppFromConfigFile(name, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		apps[name] = loaded
+	}
+	return m, apps
+}
+
+func TestCombinedUpdateRecordsEveryCheckedApp(t *testing.T) {
+	m, apps := combinedAppsFixture(t, "first-app", "second-app", "third-app")
+	m.resolve = func(_ context.Context, installed, _ *ComposeApp) ([]docker.ImageUpdate, error) {
+		image := installed.Services[0].Image
+		return []docker.ImageUpdate{{
+			Service: "web", Image: image, Status: "up_to_date",
+			CurrentVersion: installed.Name, LatestVersion: installed.Name,
+			CurrentImageID: "sha256:same", LatestImageID: "sha256:same", LatestImage: image,
+		}}, nil
+	}
+	if err := m.CheckCombined(context.Background(), apps); err != nil {
+		t.Fatal(err)
+	}
+	for name := range apps {
+		record, err := m.read(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if record.Status.CheckStatus != "up_to_date" || record.Status.CurrentVersion != name || record.Status.TargetVersion != name || record.Status.CheckedAt == nil {
+			t.Fatalf("%s: %+v", name, record.Status)
+		}
+	}
+}
+
+// A check that is abandoned must leave the last saved status alone: its results
+// are incomplete and would otherwise report healthy apps as failed.
+func TestAbandonedCheckKeepsLastSavedStatus(t *testing.T) {
+	m, _, app := combinedFixture(t)
+	checkedAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	before, err := m.read(app.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before.Combined = true
+	before.Status = AppUpdateStatus{ID: app.Name, Operation: "idle", CheckStatus: "up_to_date", CheckedAt: &checkedAt}
+	if err := m.save(app.Name, before); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	m.resolve = func(ctx context.Context, _, _ *ComposeApp) ([]docker.ImageUpdate, error) {
+		close(started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- m.CheckCombined(ctx, map[string]*ComposeApp{app.Name: app}) }()
+	<-started
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	after, err := m.read(app.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Status.CheckStatus != "up_to_date" || after.Status.CheckedAt == nil || !after.Status.CheckedAt.Equal(checkedAt) {
+		t.Fatalf("%+v", after.Status)
+	}
+}

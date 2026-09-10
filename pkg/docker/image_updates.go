@@ -8,14 +8,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
 	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/Masterminds/semver/v3"
-	cliconfig "github.com/docker/cli/cli/config"
 	"github.com/docker/distribution"
 	_ "github.com/docker/distribution/manifest/manifestlist"
 	_ "github.com/docker/distribution/manifest/ocischema"
@@ -99,11 +97,7 @@ func imageRepository(ctx context.Context, named reference.Named) (distribution.R
 	} else {
 		// Use the same config directory as image pulls, with Docker's standard
 		// registry keys and per-registry credential helpers.
-		configDir := os.Getenv("DOCKER_CONFIG")
-		if configDir == "" {
-			configDir = "/"
-		}
-		config, err := cliconfig.Load(configDir)
+		config, err := loadDockerConfig()
 		if err != nil {
 			return nil, err
 		}
