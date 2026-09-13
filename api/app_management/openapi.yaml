@@ -125,6 +125,292 @@ security:
   - access_token: []
 
 paths:
+  /assistant/settings:
+    get:
+      operationId: GetAssistantSettings
+      tags: [Assistant]
+      responses:
+        "200":
+          description: Assistant response
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400":
+          description: Invalid request
+        "401":
+          description: Authentication required
+        "404":
+          description: Conversation not found
+        "409":
+          description: Conversation busy or stale approval
+    put:
+      operationId: SaveAssistantSettings
+      tags: [Assistant]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [provider, model]
+              properties:
+                provider: {type: string, enum: [deepseek, opencode-go]}
+                model: {type: string, maxLength: 100}
+                api_key: {type: string, maxLength: 4096}
+                verify: {type: boolean, description: Test a short completion before saving the connection}
+      responses:
+        "200":
+          description: Assistant response
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400":
+          description: Invalid request
+        "401":
+          description: Authentication required
+        "404":
+          description: Conversation not found
+        "409":
+          description: Conversation busy or stale approval
+    delete:
+      operationId: DeleteAssistantSettings
+      tags: [Assistant]
+      responses:
+        "200":
+          description: Assistant response
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400":
+          description: Invalid request
+        "401":
+          description: Authentication required
+        "404":
+          description: Conversation not found
+        "409":
+          description: Conversation busy or stale approval
+  /assistant/connections/{provider}:
+    parameters:
+      - in: path
+        name: provider
+        required: true
+        schema: {type: string, enum: [deepseek, opencode-go]}
+    delete:
+      operationId: DeleteAssistantConnection
+      tags: [Assistant]
+      responses:
+        "200":
+          description: Provider disconnected; other connections remain saved
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400":
+          description: Invalid provider
+        "401":
+          description: Authentication required
+  /assistant/sessions:
+    get:
+      operationId: ListAssistantSessions
+      tags: [Assistant]
+      responses:
+        "200":
+          description: Conversation topics belonging to the authenticated user
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+    post:
+      operationId: StartAssistantSession
+      tags: [Assistant]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [message, mode]
+              properties:
+                message: {type: string, minLength: 1, maxLength: 16000}
+                mode: {type: string, enum: [read, review, auto]}
+      responses:
+        "200":
+          description: Assistant response
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400":
+          description: Invalid request
+        "401":
+          description: Authentication required
+        "404":
+          description: Conversation not found
+        "409":
+          description: Conversation busy or stale approval
+  /assistant/sessions/{session_id}:
+    get:
+      operationId: GetAssistantSession
+      tags: [Assistant]
+      parameters:
+        - in: path
+          name: session_id
+          required: true
+          schema: {type: string, pattern: "^[a-f0-9]{32}$"}
+      responses:
+        "200":
+          description: Assistant response
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400":
+          description: Invalid request
+        "401":
+          description: Authentication required
+        "404":
+          description: Conversation not found
+        "409":
+          description: Conversation busy or stale approval
+    delete:
+      operationId: DeleteAssistantSession
+      tags: [Assistant]
+      parameters:
+        - in: path
+          name: session_id
+          required: true
+          schema: {type: string, pattern: "^[a-f0-9]{32}$"}
+      responses:
+        "200":
+          description: Assistant response
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400":
+          description: Invalid request
+        "401":
+          description: Authentication required
+        "404":
+          description: Conversation not found
+        "409":
+          description: Conversation busy or stale approval
+  /assistant/sessions/{session_id}/messages:
+    post:
+      operationId: ReplyAssistantSession
+      tags: [Assistant]
+      parameters:
+        - in: path
+          name: session_id
+          required: true
+          schema: {type: string, pattern: "^[a-f0-9]{32}$"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [message]
+              properties:
+                message: {type: string, minLength: 1, maxLength: 16000}
+      responses:
+        "200":
+          description: Assistant response
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400":
+          description: Invalid request
+        "401":
+          description: Authentication required
+        "404":
+          description: Conversation not found
+        "409":
+          description: Conversation busy or stale approval
+  /assistant/sessions/{session_id}/decision:
+    post:
+      operationId: DecideAssistantSession
+      tags: [Assistant]
+      parameters:
+        - in: path
+          name: session_id
+          required: true
+          schema: {type: string, pattern: "^[a-f0-9]{32}$"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [approval_id, allow]
+              properties:
+                approval_id: {type: string, pattern: "^[a-f0-9]{32}$"}
+                allow: {type: boolean}
+      responses:
+        "200":
+          description: Assistant response
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400":
+          description: Invalid request
+        "401":
+          description: Authentication required
+        "404":
+          description: Conversation not found
+        "409":
+          description: Conversation busy or stale approval
+  /assistant/sessions/{session_id}/credentials:
+    post:
+      operationId: AddAssistantCredential
+      tags: [Assistant]
+      parameters:
+        - in: path
+          name: session_id
+          required: true
+          schema: {type: string, pattern: "^[a-f0-9]{32}$"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name, value]
+              properties:
+                name: {type: string, pattern: "^[a-z][a-z0-9_]{0,47}$"}
+                value: {type: string, minLength: 1, maxLength: 4096}
+      responses:
+        "200":
+          description: Credential stored privately for this conversation; value is not returned
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "409":
+          description: Wait for the running task or pending approval to finish
+  /assistant/sessions/{session_id}/cancel:
+    post:
+      operationId: CancelAssistantSession
+      tags: [Assistant]
+      parameters:
+        - in: path
+          name: session_id
+          required: true
+          schema: {type: string, pattern: "^[a-f0-9]{32}$"}
+      responses:
+        "200":
+          description: Assistant response
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400":
+          description: Invalid request
+        "401":
+          description: Authentication required
+        "404":
+          description: Conversation not found
+        "409":
+          description: Conversation busy or stale approval
+
   /info:
     get:
       summary: Get certain common information

@@ -9,6 +9,7 @@ import (
 
 	"github.com/IceWhaleTech/CasaOS-AppManagement/codegen"
 	"github.com/IceWhaleTech/CasaOS-AppManagement/pkg/config"
+	"github.com/IceWhaleTech/CasaOS-AppManagement/service"
 
 	v2Route "github.com/IceWhaleTech/CasaOS-AppManagement/route/v2"
 	"github.com/IceWhaleTech/CasaOS-Common/external"
@@ -45,6 +46,7 @@ func init() {
 }
 
 func InitV2Router() http.Handler {
+	service.InitAssistantSettings()
 	appManagement := v2Route.NewAppManagement()
 
 	e := echo.New()
@@ -64,6 +66,9 @@ func InitV2Router() http.Handler {
 
 	e.Use(echo_middleware.JWTWithConfig(echo_middleware.JWTConfig{
 		Skipper: func(c echo.Context) bool {
+			if strings.HasPrefix(c.Request().URL.Path, V2APIPath+"/assistant/") {
+				return false
+			}
 			return c.RealIP() == "::1" || c.RealIP() == "127.0.0.1"
 		},
 		ParseTokenFunc: func(token string, c echo.Context) (interface{}, error) {
@@ -106,12 +111,23 @@ func InitV2Router() http.Handler {
 	// })
 
 	e.Use(middleware.OapiRequestValidatorWithOptions(_swagger, &middleware.Options{
-		Options: openapi3filter.Options{AuthenticationFunc: openapi3filter.NoopAuthenticationFunc},
+		ErrorHandler: assistantValidationError,
+		Options:      openapi3filter.Options{AuthenticationFunc: openapi3filter.NoopAuthenticationFunc},
 	}))
 
 	codegen.RegisterHandlersWithBaseURL(e, appManagement, V2APIPath)
 
 	return e
+}
+
+// Validator errors can contain the submitted value in Internal. Assistant
+// requests carry credentials, so neither the response nor request logger may
+// receive that detailed error. Other API routes retain their existing behavior.
+func assistantValidationError(c echo.Context, err *echo.HTTPError) error {
+	if strings.HasPrefix(c.Request().URL.Path, V2APIPath+"/assistant/") {
+		return echo.NewHTTPError(err.Code, "Invalid assistant request. Check the fields and try again.")
+	}
+	return err
 }
 
 func InitV2DocRouter(docHTML string, docYAML string) http.Handler {

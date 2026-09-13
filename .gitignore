@@ -26,3 +26,19 @@ package-lock.json
 
 .idea
 build/sysroot/usr/bin/appfile2compose
+
+# Local development settings, generated reports and preview state
+.DS_Store
+.env
+.env.local
+.env.*.local
+.playwright-cli/
+/output/
+/coverage/
+/test-results/
+/.cache/
+/assistant-preview-state/
+/casaos-assistant-preview-server
+*.log
+__pycache__/
+*.pyc
