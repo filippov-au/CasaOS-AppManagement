@@ -1,4 +1,4 @@
-# CasaOS AI assistant (in development)
+# AI assistant (in development)
 
 The assistant is implemented in AppManagement and opens from the **AI assistant** button beside **+** in the CasaOS Apps panel. The chat panel has conversation topics on the left, a new-chat action, a model picker, and a permission selector beside the composer. Provider connections are managed through **CasaOS Settings → AI settings → Manage**.
 
