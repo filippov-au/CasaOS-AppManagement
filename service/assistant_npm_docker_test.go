@@ -192,6 +192,32 @@ x-casaos:
 		})
 		run("compose", "-f", file, "up", "-d")
 	}
+	// Exercise the actual CasaOS update path: saved Compose keeps the named
+	// image, but the running container is created with an immutable image ID.
+	npmApp, e := assistantLoad(npmName)
+	if e != nil {
+		t.Fatal(e)
+	}
+	npmYAML, e := os.ReadFile(files[npmName])
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = (dockerUpdateRuntime{}).Apply(ctx, npmApp, npmYAML); e != nil {
+		t.Fatal(e)
+	}
+	instances, e := AssistantNPMDiscover(ctx)
+	if e != nil {
+		t.Fatal(e)
+	}
+	discovered := false
+	for _, instance := range instances {
+		if instance.App == npmName && instance.Service == "npm" && npmImage(instance.Image) {
+			discovered = true
+		}
+	}
+	if !discovered {
+		t.Fatal("NPM disappeared from discovery after a CasaOS update")
+	}
 	c := assistant.NPMConnection{App: npmName, Service: "npm", Username: "fixture@example.com", Password: "fixture-password-123", Suffix: "apps.casaos.test", AccessListID: 0}
 	var api *assistant.NPMClient
 	for deadline := time.Now().Add(75 * time.Second); time.Now().Before(deadline); {

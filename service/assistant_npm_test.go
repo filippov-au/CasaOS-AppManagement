@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	stdjson "encoding/json"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"net"
 	"net/http"
@@ -24,6 +25,7 @@ import (
 	"github.com/IceWhaleTech/CasaOS-AppManagement/internal/assistant"
 	"github.com/IceWhaleTech/CasaOS-Common/utils/logger"
 	dockerTypes "github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
 )
 
 func npmTestCertificate(t *testing.T, domain string) ([]byte, []byte, *x509.CertPool) {
@@ -170,5 +172,67 @@ func TestAssistantNPMInspectExcludesLoginFromModel(t *testing.T) {
 	b, e := stdjson.Marshal(inv)
 	if e != nil || strings.Contains(string(b), "do-not-expose") {
 		t.Fatal(string(b), e)
+	}
+}
+
+type npmImageFixture struct {
+	container      dockerTypes.ContainerJSON
+	image          dockerTypes.ImageInspect
+	containerCalls int
+	imageCalls     int
+}
+
+func (f *npmImageFixture) ContainerInspect(_ context.Context, id string) (dockerTypes.ContainerJSON, error) {
+	f.containerCalls++
+	return f.container, nil
+}
+func (f *npmImageFixture) ImageInspectWithRaw(_ context.Context, id string) (dockerTypes.ImageInspect, []byte, error) {
+	f.imageCalls++
+	if f.container.ContainerJSONBase == nil || id != f.container.Image {
+		return dockerTypes.ImageInspect{}, nil, fmt.Errorf("inspected the wrong image")
+	}
+	return f.image, nil, nil
+}
+
+func TestAssistantNPMRecognizesNormalizedImageReferences(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	for _, ref := range []string{"jc21/nginx-proxy-manager", "jc21/nginx-proxy-manager:2.15.1", "docker.io/jc21/nginx-proxy-manager", "index.docker.io/jc21/nginx-proxy-manager:latest", "docker.io/jc21/nginx-proxy-manager@" + digest, "jc21/nginx-proxy-manager:2.15.1@" + digest} {
+		if !npmImage(ref) {
+			t.Errorf("missed official NPM reference %s", ref)
+		}
+	}
+	for _, ref := range []string{"nginx:alpine", "someone/nginx-proxy-manager:latest", "registry.example/jc21/nginx-proxy-manager:latest", "jc21/nginx-proxy-manager-extra:latest", "jc21/nginx-proxy-manager:", digest} {
+		if npmImage(ref) {
+			t.Errorf("accepted unrelated or invalid reference %s", ref)
+		}
+	}
+}
+func TestAssistantNPMRecognizesImagesPinnedByCasaOSUpdates(t *testing.T) {
+	id := "sha256:" + strings.Repeat("a", 64)
+	cases := []struct {
+		name, display, configured string
+		tags, digests             []string
+		want                      string
+	}{
+		{name: "named image", display: "jc21/nginx-proxy-manager:2.15.1", want: "jc21/nginx-proxy-manager:2.15.1"},
+		{name: "image ID after CasaOS update", display: id, configured: id, tags: []string{"jc21/nginx-proxy-manager:2.15.1"}, want: "jc21/nginx-proxy-manager:2.15.1"},
+		{name: "short image ID", display: strings.Repeat("a", 12), configured: id, tags: []string{"jc21/nginx-proxy-manager:2.15.1"}, want: "jc21/nginx-proxy-manager:2.15.1"},
+		{name: "moved tag", display: id, configured: "jc21/nginx-proxy-manager:latest", want: "jc21/nginx-proxy-manager:latest"},
+		{name: "digest only", display: id, configured: id, digests: []string{"docker.io/jc21/nginx-proxy-manager@" + id}, want: "docker.io/jc21/nginx-proxy-manager@" + id},
+		{name: "unrelated named image", display: "nginx:alpine"},
+		{name: "unrelated pinned image", display: id, configured: id, tags: []string{"nginx:alpine"}},
+		{name: "unidentifiable pinned image", display: id, configured: id},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := &npmImageFixture{container: dockerTypes.ContainerJSON{ContainerJSONBase: &dockerTypes.ContainerJSONBase{Image: id}, Config: &container.Config{Image: tc.configured}}, image: dockerTypes.ImageInspect{ID: id, RepoTags: tc.tags, RepoDigests: tc.digests}}
+			got, e := npmInstalledImage(context.Background(), fixture, dockerTypes.Container{ID: "fixture", Image: tc.display})
+			if e != nil || got != tc.want {
+				t.Fatalf("got %q (%v), want %q", got, e, tc.want)
+			}
+			if strings.Contains(tc.name, "named image") && fixture.containerCalls != 0 {
+				t.Fatal("inspected a container whose named image was already known")
+			}
+		})
 	}
 }

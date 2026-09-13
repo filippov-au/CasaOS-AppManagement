@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/IceWhaleTech/CasaOS-AppManagement/common"
 	"github.com/IceWhaleTech/CasaOS-AppManagement/internal/assistant"
+	reference "github.com/docker/distribution/reference"
 	dockerTypes "github.com/docker/docker/api/types"
 	"github.com/docker/docker/client"
 )
@@ -37,8 +39,53 @@ type AssistantNPMInstance struct {
 }
 
 func npmImage(image string) bool {
-	return image == "jc21/nginx-proxy-manager" || strings.HasPrefix(image, "jc21/nginx-proxy-manager:") || strings.HasPrefix(image, "jc21/nginx-proxy-manager@") || strings.HasPrefix(image, "docker.io/jc21/nginx-proxy-manager:")
+	named, err := reference.ParseNormalizedNamed(image)
+	return err == nil && named.Name() == "docker.io/jc21/nginx-proxy-manager"
 }
+
+var npmImageID = regexp.MustCompile(`^(?:sha256:)?[a-f0-9]{12,64}$`)
+
+type npmImageInspector interface {
+	ContainerInspect(context.Context, string) (dockerTypes.ContainerJSON, error)
+	ImageInspectWithRaw(context.Context, string) (dockerTypes.ImageInspect, []byte, error)
+}
+
+// CasaOS updates deliberately start containers by immutable image ID. Docker's
+// container list can also show IDs when the original tag has moved. Identify the
+// actual installed image, rather than treating that display field as a repo name.
+func npmInstalledImage(ctx context.Context, cli npmImageInspector, c dockerTypes.Container) (string, error) {
+	if npmImage(c.Image) {
+		return c.Image, nil
+	}
+	if c.Image != "" && !npmImageID.MatchString(c.Image) {
+		return "", nil
+	}
+	info, err := cli.ContainerInspect(ctx, c.ID)
+	if err != nil {
+		return "", errors.New("could not inspect a container while discovering NPM; refresh applications")
+	}
+	if info.Config != nil && npmImage(info.Config.Image) {
+		return info.Config.Image, nil
+	}
+	if info.ContainerJSONBase == nil || info.Image == "" {
+		return "", nil
+	}
+	installed, _, err := cli.ImageInspectWithRaw(ctx, info.Image)
+	if err != nil {
+		return "", errors.New("could not inspect an installed image while discovering NPM; refresh applications")
+	}
+	tags := append([]string{}, installed.RepoTags...)
+	sort.Strings(tags)
+	digests := append([]string{}, installed.RepoDigests...)
+	sort.Strings(digests)
+	for _, name := range append(tags, digests...) {
+		if npmImage(name) {
+			return name, nil
+		}
+	}
+	return "", nil
+}
+
 func AssistantNPMDiscover(ctx context.Context) ([]AssistantNPMInstance, error) {
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
@@ -51,11 +98,16 @@ func AssistantNPMDiscover(ctx context.Context) ([]AssistantNPMInstance, error) {
 	}
 	out := []AssistantNPMInstance{}
 	for _, c := range items {
-		if npmImage(c.Image) {
-			a, s := c.Labels["com.docker.compose.project"], c.Labels["com.docker.compose.service"]
-			if assistantName.MatchString(a) && assistantName.MatchString(s) {
-				out = append(out, AssistantNPMInstance{a, s, c.Image, c.State == "running"})
-			}
+		a, s := c.Labels["com.docker.compose.project"], c.Labels["com.docker.compose.service"]
+		if !assistantName.MatchString(a) || !assistantName.MatchString(s) {
+			continue
+		}
+		image, err := npmInstalledImage(ctx, cli, c)
+		if err != nil {
+			return nil, err
+		}
+		if image != "" {
+			out = append(out, AssistantNPMInstance{a, s, image, c.State == "running"})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].App+out[i].Service < out[j].App+out[j].Service })
@@ -105,7 +157,11 @@ func npmResolve(ctx context.Context, c assistant.NPMConnection) (*assistant.NPMC
 	if e != nil {
 		return nil, target, e
 	}
-	if !npmImage(target.Image) {
+	image, e := npmInstalledImage(ctx, cli, target)
+	if e != nil {
+		return nil, target, e
+	}
+	if image == "" {
 		return nil, target, errors.New("selected service is not a supported NPM image")
 	}
 	addr, e := npmPublished(target, 81)
