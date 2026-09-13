@@ -201,7 +201,7 @@ func npmInventory(ctx context.Context, c assistant.NPMConnection) (AssistantNPMI
 		return out, e
 	}
 	for _, h := range hosts {
-		out.Hosts = append(out.Hosts, map[string]interface{}{"id": h.ID, "domain_names": h.Domains, "certificate_id": h.CertificateID, "access_list_id": h.AccessListID, "enabled": h.Enabled})
+		out.Hosts = append(out.Hosts, map[string]interface{}{"id": h.ID, "domain_names": h.Domains, "certificate_id": h.CertificateID, "access_list_id": h.AccessListID, "enabled": h.Enabled, "forward_scheme": h.Scheme, "forward_host": h.Host, "forward_port": h.Port})
 	}
 	return out, nil
 }
@@ -278,7 +278,7 @@ func assistantNPMTools() []assistant.Tool {
 	target := map[string]interface{}{"app": str(), "service": str(), "port": map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 65535}, "label": str()}
 	return []assistant.Tool{
 		tool("npm_inspect", "Inspect the saved Nginx Proxy Manager connection, certificates, eligible wildcard suffixes, proxy hosts and Access Lists. If disconnected, ask the owner to connect NPM in AI settings. Never request credentials in chat.", schema(map[string]interface{}{})),
-		tool("publish_app", "Publish a web service using the configured NPM wildcard suffix and access policy. Requires a valid wildcard certificate. Uses HTTP upstream, HTTPS externally, WebSockets and HTTP-to-HTTPS redirection. May connect the app and NPM through a persistent shared Docker network, restarting containers. Verifies TLS and HTTP before updating the CasaOS card. label is one DNS label, not a domain. Inspect first.", schema(target, "app", "service", "port")),
+		tool("publish_app", "Publish a web service using the configured NPM wildcard suffix and access policy. Requires a valid wildcard certificate. Uses HTTP upstream, HTTPS externally, WebSockets and HTTP-to-HTTPS redirection. port is the container TCP port, not the host port. Reuses a shared network or maps the observed published host port automatically (including NPM network_mode bridge). Only adds a shared network if neither existing route is usable; that can restart containers. Do not preconfigure networks for publication. Verifies TLS and HTTP before updating the CasaOS card. label is one DNS label, not a domain. Inspect first.", schema(target, "app", "service", "port")),
 		tool("check_app_url", "Verify a previously published app URL through its associated NPM: wildcard certificate, TLS trust, DNS and HTTP status. Does not follow redirects or open arbitrary URLs.", schema(map[string]interface{}{"app": str(), "label": str()}, "app")),
 	}
 }
@@ -615,6 +615,10 @@ func assistantNPMPlan(ctx context.Context, name string, raw stdjson.RawMessage) 
 	if e != nil {
 		return assistant.Prepared{}, e
 	}
+	npmIdx := npmServiceIndex(npmApp, c.Service)
+	if npmIdx < 0 {
+		return assistant.Prepared{}, errors.New("NPM service not found in saved Compose")
+	}
 	appHash, e := npmAppHash(app)
 	if e != nil {
 		return assistant.Prepared{}, e
@@ -659,10 +663,13 @@ func assistantNPMPlan(ctx context.Context, name string, raw stdjson.RawMessage) 
 		return assistant.Prepared{}, e
 	}
 	snapshot := npmSnapshotHost(existing)
-	_, networkErr := npmUpstream(ctx, cli, app, a.Service, npm)
+	plannedTarget, networkErr := npmRouteUpstream(ctx, cli, app, a.Service, a.Port, npm)
 	var networkPlans []assistant.Prepared
 	afterAppHash, afterNPMHash := appHash, npmHash
 	if networkErr != nil {
+		if npmApp.Services[npmIdx].NetworkMode != "" || app.Services[idx].NetworkMode != "" {
+			return assistant.Prepared{}, networkErr
+		}
 		networkPlans, e = npmNetworkPlans(app, npmApp, a.Service, c.Service)
 		if e != nil {
 			return assistant.Prepared{}, e
@@ -682,6 +689,9 @@ func assistantNPMPlan(ctx context.Context, name string, raw stdjson.RawMessage) 
 		access = fmt.Sprintf("Access List %d", c.AccessListID)
 	}
 	summary := fmt.Sprintf("Publish %s / %s port %d at https://%s using wildcard certificate %d (%s), %s access, HTTPS redirect and WebSockets. Verify before updating the CasaOS card.", a.App, a.Service, a.Port, domain, cert.ID, cert.Expires, access)
+	if plannedTarget.Published {
+		summary += fmt.Sprintf(" Forward through existing host binding %s; keep app and NPM networking unchanged.", net.JoinHostPort(plannedTarget.Host, strconv.Itoa(plannedTarget.Port)))
+	}
 	if len(networkPlans) > 0 {
 		summary += " Connect the app and NPM to " + npmNetworkName(c.App, c.Service) + "; both containers may restart. Existing networks are retained."
 	}
@@ -785,9 +795,12 @@ func assistantNPMPlan(ctx context.Context, name string, raw stdjson.RawMessage) 
 			return "", e
 		}
 		defer docker.Close()
-		upstream, e := npmUpstream(ctx, docker, updated, a.Service, npm)
+		upstream, e := npmRouteUpstream(ctx, docker, updated, a.Service, a.Port, npm)
 		if e != nil {
 			return "", e
+		}
+		if len(networkPlans) == 0 && upstream != plannedTarget {
+			return "", errors.New("upstream address or port changed since the proposal; inspect and propose again")
 		}
 		if record.Marker == "" {
 			record = assistant.NPMRoute{App: a.App, Service: a.Service, Domain: domain, Marker: assistant.ID()}
@@ -797,7 +810,7 @@ func assistantNPMPlan(ctx context.Context, name string, raw stdjson.RawMessage) 
 		if e = assistantNPMStore.SaveRoute(owner, c, record); e != nil {
 			return "", e
 		}
-		desired := assistant.NPMHost{Domains: []string{domain}, Scheme: "http", Host: upstream, Port: a.Port, CertificateID: cert.ID, AccessListID: c.AccessListID, SSLForced: true, Websocket: true, Enabled: true, Locations: []stdjson.RawMessage{}, Meta: map[string]interface{}{"casaos_assistant": record.Marker}}
+		desired := assistant.NPMHost{Domains: []string{domain}, Scheme: "http", Host: upstream.Host, Port: upstream.Port, CertificateID: cert.ID, AccessListID: c.AccessListID, SSLForced: true, Websocket: true, Enabled: true, Locations: []stdjson.RawMessage{}, Meta: map[string]interface{}{"casaos_assistant": record.Marker}}
 		saved := desired
 		if existing == nil {
 			e = active.Call(ctx, "POST", "/nginx/proxy-hosts", desired, &saved)
@@ -1080,11 +1093,11 @@ func npmCheckSaved(ctx context.Context, owner string, c assistant.NPMConnection,
 		return "", e
 	}
 	defer docker.Close()
-	upstream, e := npmUpstream(ctx, docker, app, r.Service, npm)
+	upstream, e := npmRouteUpstream(ctx, docker, app, r.Service, r.Port, npm)
 	if e != nil {
 		return "", e
 	}
-	if h.Host != upstream || h.Port != r.Port || h.Scheme != "http" || h.Advanced != "" || len(h.Locations) > 0 {
+	if h.Host != upstream.Host || h.Port != upstream.Port || h.Scheme != "http" || h.Advanced != "" || len(h.Locations) > 0 {
 		return "", errors.New("saved route upstream changed; inspect and republish")
 	}
 	result, e := npmProbeApp(ctx, npm, app, domain, c.Suffix)

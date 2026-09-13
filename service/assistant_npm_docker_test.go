@@ -109,6 +109,12 @@ func TestAssistantNPMDockerPublication(t *testing.T) {
 	if os.Getenv("CASAOS_ASSISTANT_NPM_DOCKER_TEST") != "1" {
 		t.Skip("set CASAOS_ASSISTANT_NPM_DOCKER_TEST=1")
 	}
+	for _, mode := range []string{"shared-network", "published-port"} {
+		t.Run(mode, func(t *testing.T) { npmDockerPublication(t, mode == "published-port") })
+	}
+}
+
+func npmDockerPublication(t *testing.T, published bool) {
 	logger.LogInitConsoleOnly()
 	root := assistantTestRoot(t)
 	oldStore := assistantNPMStore
@@ -134,6 +140,15 @@ func TestAssistantNPMDockerPublication(t *testing.T) {
 		}
 	}
 	files := map[string]string{}
+	hostPort := 0
+	if published {
+		listener, err := net.Listen("tcp4", "0.0.0.0:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		hostPort = listener.Addr().(*net.TCPAddr).Port
+		listener.Close()
+	}
 	python := `from http.server import BaseHTTPRequestHandler, HTTPServer
 import base64, hashlib
 class Handler(BaseHTTPRequestHandler):
@@ -180,6 +195,13 @@ x-casaos:
 `
 		} else {
 			content += "services:\n  web:\n    image: python:3.13-alpine\n    expose: ['8080']\n    command: " + string(command) + "\nx-casaos:\n  main: web\n  index: /library\n"
+		}
+		if published {
+			if name == npmName {
+				content = strings.Replace(content, "  npm:\n", "  npm:\n    network_mode: bridge\n", 1)
+			} else {
+				content = strings.Replace(content, "    expose:", fmt.Sprintf("    ports: ['%d:8080']\n    expose:", hostPort), 1)
+			}
 		}
 		if e = os.WriteFile(file, []byte(content), 0600); e != nil {
 			t.Fatal(e)
@@ -270,8 +292,42 @@ x-casaos:
 			t.Fatal(out)
 		}
 	}
+	// Published-port publication must leave NPM Compose and both containers intact.
+	beforeNPM, e := os.ReadFile(files[npmName])
+	if e != nil {
+		t.Fatal(e)
+	}
+	containerIDs := func() string {
+		t.Helper()
+		b, err := exec.CommandContext(ctx, "docker", "ps", "--filter", "label=com.docker.compose.project="+npmName, "--filter", "label=com.docker.compose.project="+appName, "--format", "{{.ID}}").Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	beforeIDs := containerIDs()
+	var unrelated assistant.NPMHost
+	if published {
+		unrelated = assistant.NPMHost{Domains: []string{"unrelated.apps.casaos.test"}, Scheme: "http", Host: "192.0.2.1", Port: 8123, CertificateID: certID, SSLForced: true, Enabled: true, Locations: []stdjson.RawMessage{}, Meta: map[string]interface{}{}}
+		if e = api.Call(ctx, "POST", "/nginx/proxy-hosts", unrelated, &unrelated); e != nil {
+			t.Fatal(e)
+		}
+		if e = api.Call(ctx, "GET", "/nginx/proxy-hosts/"+strconv.Itoa(unrelated.ID), nil, &unrelated); e != nil {
+			t.Fatal(e)
+		}
+	}
 	publish()
 	publish()
+	if published {
+		afterNPM, err := os.ReadFile(files[npmName])
+		if err != nil || !bytes.Equal(beforeNPM, afterNPM) || beforeIDs != containerIDs() {
+			t.Fatal("host-port publication changed NPM settings or recreated containers", err)
+		}
+		var readback assistant.NPMHost
+		if e = api.Call(ctx, "GET", "/nginx/proxy-hosts/"+strconv.Itoa(unrelated.ID), nil, &readback); e != nil || npmSnapshotHost(&readback) != npmSnapshotHost(&unrelated) {
+			t.Fatalf("unrelated proxy host changed: before=%s after=%s error=%v", npmSnapshotHost(&unrelated), npmSnapshotHost(&readback), e)
+		}
+	}
 	api.Close()
 	api, _, e = npmResolve(ctx, c)
 	if e != nil {
@@ -279,8 +335,23 @@ x-casaos:
 	}
 	defer api.Close()
 	hosts, e := api.Hosts(ctx)
-	if e != nil || len(hosts) != 1 || hosts[0].CertificateID != certID || hosts[0].Host != appName+"-web" {
+	if e != nil {
+		t.Fatal(e)
+	}
+	host, e := npmFindHost(hosts, "fixture.apps.casaos.test")
+	wantCount := 1
+	if published {
+		wantCount++
+	}
+	if e != nil || len(hosts) != wantCount || host == nil || host.CertificateID != certID {
 		t.Fatal("duplicate or invalid hosts", e)
+	}
+	if published {
+		if net.ParseIP(host.Host) == nil || host.Port != hostPort {
+			t.Fatal("incorrect host-port upstream", host)
+		}
+	} else if host.Host != appName+"-web" || host.Port != 8080 {
+		t.Fatal("incorrect shared-network upstream", host)
 	}
 	active, npm, e := npmResolve(ctx, c)
 	if e != nil {
