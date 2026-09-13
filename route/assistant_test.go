@@ -36,3 +36,16 @@ func TestAssistantRequiresJWTOnLoopbackAndIgnoresForgedUserHeader(t *testing.T) 
 		}
 	}
 }
+
+func TestAssistantNPMRoutesRequireJWT(t *testing.T) {
+	e := InitV2Router()
+	for _, entry := range []struct{ method, path string }{{"GET", "/npm"}, {"GET", "/npm/discovery"}, {"POST", "/npm/verify"}, {"PUT", "/npm"}, {"DELETE", "/npm"}} {
+		req := httptest.NewRequest(entry.method, V2APIPath+"/assistant"+entry.path, nil)
+		req.Header.Set("user_id", "1")
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s %s accepted without JWT: %d", entry.method, entry.path, rec.Code)
+		}
+	}
+}

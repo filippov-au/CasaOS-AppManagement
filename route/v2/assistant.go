@@ -17,7 +17,7 @@ func assistantReply(c echo.Context, data interface{}, err error) error {
 		if errors.Is(err, assistant.ErrNotFound) {
 			code = http.StatusNotFound
 		}
-		if errors.Is(err, assistant.ErrBusy) {
+		if errors.Is(err, assistant.ErrBusy) || errors.Is(err, service.ErrAppOperationBusy) {
 			code = http.StatusConflict
 		}
 		return c.JSON(code, map[string]string{"message": err.Error()})

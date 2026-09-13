@@ -125,6 +125,114 @@ security:
   - access_token: []
 
 paths:
+  /assistant/npm/discovery:
+    get:
+      operationId: DiscoverAssistantNPM
+      tags: [Assistant]
+      responses:
+        "200":
+          description: NPM response; credentials are never returned
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400":
+          description: Invalid connection or publication settings
+        "401":
+          description: Authentication required
+        "409":
+          description: NPM operation in progress
+  /assistant/npm:
+    get:
+      operationId: GetAssistantNPM
+      tags: [Assistant]
+      responses:
+        "200":
+          description: NPM response; credentials are never returned
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400":
+          description: Invalid connection or publication settings
+        "401":
+          description: Authentication required
+        "409":
+          description: NPM operation in progress
+    put:
+      operationId: SaveAssistantNPM
+      tags: [Assistant]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [app, service, username]
+              properties:
+                app: {type: string, minLength: 1, maxLength: 63}
+                service: {type: string, minLength: 1, maxLength: 63}
+                username: {type: string, minLength: 1, maxLength: 320}
+                password: {type: string, maxLength: 4096, writeOnly: true}
+                suffix: {type: string, maxLength: 189}
+                access_list_id: {type: integer, minimum: 0}
+      responses:
+        "200":
+          description: NPM response; credentials are never returned
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400":
+          description: Invalid connection or publication settings
+        "401":
+          description: Authentication required
+        "409":
+          description: NPM operation in progress
+    delete:
+      operationId: DeleteAssistantNPM
+      tags: [Assistant]
+      responses:
+        "200":
+          description: NPM response; credentials are never returned
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400":
+          description: Invalid connection or publication settings
+        "401":
+          description: Authentication required
+        "409":
+          description: NPM operation in progress
+  /assistant/npm/verify:
+    post:
+      operationId: VerifyAssistantNPM
+      tags: [Assistant]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [app, service, username]
+              properties:
+                app: {type: string, minLength: 1, maxLength: 63}
+                service: {type: string, minLength: 1, maxLength: 63}
+                username: {type: string, minLength: 1, maxLength: 320}
+                password: {type: string, maxLength: 4096, writeOnly: true}
+                suffix: {type: string, maxLength: 189}
+                access_list_id: {type: integer, minimum: 0}
+      responses:
+        "200":
+          description: NPM response; credentials are never returned
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400":
+          description: Invalid connection or publication settings
+        "401":
+          description: Authentication required
+        "409":
+          description: NPM operation in progress
   /assistant/settings:
     get:
       operationId: GetAssistantSettings
