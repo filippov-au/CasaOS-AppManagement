@@ -71,10 +71,10 @@ func (AssistantRuntime) Tools() []assistant.Tool {
 		tool("configure_service", "Merge environment values and optionally replace published TCP ports, change the image, or add/update bind mounts by container target. Set shared_network to a casaos-ai- prefixed name to connect separately installed apps through a persistent internal bridge; join each participating service to the same name. Preserves existing networks and adds unique app-service DNS aliases. Keeps unspecified settings and mounts, backs up Compose, and attempts recovery if applying fails. Mount changes do not move or delete existing data. Inspect current settings first.", schema(map[string]interface{}{"app": str(), "service": str(), "shared_network": str(), "image": str(), "environment": env, "ports": map[string]interface{}{"type": "array", "items": port}, "volumes": map[string]interface{}{"type": "array", "items": volume}}, "app", "service")),
 		tool("retry_app", "Pull the saved app images and start or reconcile its saved Compose configuration, including a partially failed installation. Uses the app lock and rejects changed settings. Does not remove volumes or data. Inspect logs and web endpoints afterward.", app),
 		tool("restart_app", "Restart all containers in a CasaOS app, preserving data and configuration. Check logs and endpoints afterward.", app),
-	}, append(append(assistantMediaTools(), assistantSetupTools()...), assistantNPMTools()...)...)
+	}, append(append(assistantMediaTools(), assistantSetupTools()...), append(assistantNPMTools(), assistantWebTools()...)...)...)
 }
 func (AssistantRuntime) IsWrite(name string) bool {
-	return name == "publish_app" || name == "retry_app" || name == "create_app_directory" || name == "configure_nzbget" || name == "add_sonarr_root_folder" || name == "configure_sonarr_indexer" || name == "add_plex_library" || name == "connect_sonarr_nzbget" || name == "install_stack" || name == "configure_service" || name == "restart_app"
+	return name == "download_app_content" || name == "publish_app" || name == "retry_app" || name == "create_app_directory" || name == "configure_nzbget" || name == "add_sonarr_root_folder" || name == "configure_sonarr_indexer" || name == "add_plex_library" || name == "connect_sonarr_nzbget" || name == "install_stack" || name == "configure_service" || name == "restart_app"
 }
 
 type assistantPort struct {
@@ -180,6 +180,12 @@ func assistantContainerViews(items []dockerTypes.Container) []map[string]interfa
 	return result
 }
 func (r AssistantRuntime) Prepare(ctx context.Context, name string, raw stdjson.RawMessage) (assistant.Prepared, error) {
+	if name == "web_search" || name == "web_read" {
+		return assistantWebPlan(name, raw)
+	}
+	if name == "app_content" || name == "download_app_content" {
+		return assistantContentPlan(ctx, name, raw)
+	}
 	if name == "npm_inspect" || name == "publish_app" || name == "check_app_url" {
 		return assistantNPMPlan(ctx, name, raw)
 	}
